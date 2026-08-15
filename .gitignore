@@ -1,0 +1,49 @@
+# 忽略规则（qoqtun）
+
+# ===== 私钥 / 证书 / 安全敏感文件 =====
+*.key
+*.pem
+*.crt
+*.csr
+*.der
+ca/
+state/
+tokens*.json
+clients.json
+revoked.json
+serial.txt
+
+# ===== 环境与密钥 =====
+.env
+.env.*
+*.env
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 构建产物 =====
+dist/
+build/
+bin/
+out/
+coverage.out
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
+
+# ===== 本地工具 / 编辑器状态 =====
+.workbuddy/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== OS 杂物 =====
+.DS_Store
+Thumbs.db
+Desktop.ini
