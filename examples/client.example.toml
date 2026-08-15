@@ -1,0 +1,46 @@
+# qoqtun Client 示例配置
+# 字段定义与校验规则见 docs/plan/05-config-schema.md（唯一事实来源）。
+# 本文件为示例：占位值（tunnel.example.com 等）必须替换后再部署。
+# 客户端私钥/证书由 enroll 生成并存入系统安全存储，不在此手写。
+
+# ===== 必填 =====
+server_addr = "tunnel.example.com:7000"   # hostname 或 IP + 端口；hostname 须 RFC1123；<替换为实际 Server 地址>
+ca_fingerprint = ""                       # 可选：钉扎 CA 证书 SHA-256（首次 enroll 可 --trust-on-first-use 显式确认）
+
+[identity]
+# client_id 由 cert init 生成并持久化于安全状态文件，不在此手写
+
+[tls]
+# 无 insecure 选项 —— 设计上不存在
+
+[reconnect]
+initial_backoff = "1s"
+max_backoff = "60s"                      # ≤10min
+jitter = 0.2
+
+[heartbeat]                              # 以 server 下发为准，此处仅客户端下限保护
+enabled = true
+
+[logging]
+level = "info"
+format = "text"
+file = ""
+
+# ===== Tunnel 定义（可多条）=====
+[[tunnels]]
+name = "ssh"                             # ^[a-zA-Z0-9_-]{1,64}$，全局唯一
+type = "tcp"                             # tcp|udp|http|https
+remote_port = 22000                      # 须在服务端 allowed_ports 内（注册时由 server 仲裁）
+local_ip = "127.0.0.1"                   # 字面 IP 或白名单主机名；禁 0.0.0.0
+local_port = 22
+enabled = true
+idle_timeout = "5m"
+
+[[tunnels]]
+name = "web"
+type = "http"
+http_host = "blog.example.com"           # type=http 时使用；RFC1123 域名；<替换为实际域名>
+remote_port = 0                          # http 走 vhost 时可为 0
+local_ip = "127.0.0.1"
+local_port = 8080
+enabled = true

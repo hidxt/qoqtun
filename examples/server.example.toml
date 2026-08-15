@@ -1,0 +1,45 @@
+# qoqtun Server 示例配置
+# 字段定义与校验规则见 docs/plan/05-config-schema.md（唯一事实来源）。
+# 本文件为示例：所有值均可按需修改；占位值（<...>）必须替换后再部署。
+# 敏感信息（CA 私钥、Token、客户端登记）不会出现在配置中，一律位于 state_dir 之下。
+
+# ===== 必填（无默认值）=====
+state_dir = "/var/lib/qoqtun"          # CA/证书/吊销/Token/客户端登记所在目录；校验：绝对路径、存在或可由当前用户创建
+
+# ===== 网络监听 =====
+[listen]
+control_addr = "0.0.0.0:7000"          # mTLS 控制+数据入口
+enroll_addr  = "0.0.0.0:7001"          # Enrollment；设 "" 关闭
+enroll_enabled = true
+http_vhost_port = 0                    # HTTP Host 路由共享端口；0=禁用（HTTP tunnel 退化为独占端口）
+
+# ===== 客户端策略（全局默认，可作 per-client 覆盖的基础）=====
+[policy]
+allowed_ports = ["20000-29999"]        # 允许注册的公网端口区间；禁止包含 control/enroll 端口
+max_tunnels_per_client = 16            # 1..1024
+max_conns_per_client   = 256           # 并发转发连接 1..100000
+max_conns_per_tunnel   = 128
+bandwidth_bps_per_client = 0           # 0=不限（文档建议显式设置）
+bandwidth_bps_per_tunnel = 0
+allowed_targets = ["10.0.0.0/8:*"]     # Client 回源目标白名单 "CIDR:port或区间"；<默认仅示例，部署必须显式配置>
+udp_max_sessions_per_tunnel = 256
+udp_max_packet = 1500                  # ≤65507
+udp_session_idle_timeout = "60s"
+
+# ===== 心跳 =====
+[heartbeat]
+interval_s = 15                        # 5..300
+timeout_s  = 10
+miss_threshold = 2
+
+# ===== 证书 =====
+[pki]
+ca_validity_years = 10
+client_cert_validity_days = 90         # 1..825
+token_ttl = "1h"                       # ≤24h
+
+# ===== 日志 =====
+[logging]
+level = "info"                         # debug/info/warn/error
+format = "json"                        # json/text
+file = ""                              # ""=stderr；写文件时 0640 + 目录校验
