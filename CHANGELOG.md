@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added（Phase 9 — ACL、限速、连接限额、资源保护）
+- `internal/security`：并发信号量（per-client/per-tunnel，满则立即拒绝不排队）、token bucket 带宽限速（x/time/rate，读/写双向、连接关闭释放等待者）、每公网 IP 连接门（并发+速率）、RLIMIT_NOFILE/root 启动守卫（可注入检测函数）。
+- Server 强制执行点：注册频率限制（5/s burst 32）、控制消息速率（200/s 超限 ERR_RATE_LIMITED 断连）、allowed_targets **注册时校验**（ERR_TARGET_NOT_ALLOWED，客户端拨号前双保险）、数据连接 quota+限速包装（TCP splice 与 UDP 通道一致）。
+- 修复：half-open 限制只用于控制面 hello（数据连接不再被误伤）；policy 字段新增 max_conns_per_tunnel / bandwidth_bps_per_tunnel（协议同步）。
+- cmd/server：`--allow-root` / `--allow-low-fdlimit` / `--pprof 127.0.0.1:6060`（默认关，仅本机）。
+- 测试：限额/限速/注册频率/ACL/洪泛可用性/配额释放（±10% 限速精度、100 并发回归、无泄漏）；security 包单测（信号量/bucket/IPGate/守卫注入）。
+- docs/operations/policy.md（策略手册）。
+
 ### Added（Phase 8 — HTTP/HTTPS Tunnel）
 - `type=http` 双模式：vhost（remote_port=0 + http_host，共享 `http_vhost_port` 按 Host 路由，精确+最长后缀匹配、大小写/端口/尾点归一化）+ 独占端口退化（TCP 语义）。
 - `type=https`：纯 L4 Passthrough 别名（强制 remote_port，端到端 TLS 不过 Server，无 SNI 路由）。
