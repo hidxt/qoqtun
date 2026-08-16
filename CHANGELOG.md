@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Added（Phase 12 — Desktop Core：Wails 骨架与 coreapi）
+- `internal/coreapi`：Desktop 唯一入口（薄壳门面）——生命周期 Start/Stop/Status、Tunnel CRUD（Upsert/Delete 写回 client.toml 走 config 校验）、Config Get/Update（校验+持久化）、Identity（仅元数据，无密钥/证书/Token）、Stats（metrics 快照）、Events（无订阅泄漏）。全部输入校验与 config 同源。
+- `cmd/desktop`：Wails v2 工程（绑定 coreapi；最小静态前端验证绑定——状态/身份/统计/隧道面板，无任何网络/TLS/密钥代码）。依赖白名单新增 wails/v2。
+- `internal/platform/desktop`：Autostart 三平台实现（Windows HKCU Run / Linux XDG / macOS launchd plist，显式 opt-in）+ Tray/Notifier 接口（V1 显式 not-supported）。
+- 测试：coreapi 无头集成（配置 CRUD 正反例、真实 Server 生命周期、身份/统计、-race 由 CI 覆盖）；desktop 平台（tray/notifier not-supported、autostart 校验、命令串转义）。
+- docs/coreapi.md（方法签名/参数/返回/错误——Phase 13 前端只依赖本文档）。
+
 ### Added（Phase 11 — Client CLI 完整化）
 - 运行时 tunnel 控制：`client tunnel list/start/stop/status`，通过 127.0.0.1 本地控制端点（随机端口 + CSPRNG token，0600 状态文件承载）；start/stop 仅运行时生效（V1 配置变更=重启生效）。
 - clientcore：per-tunnel 动态注册/注销（`RegisterTunnel`/`UnregisterTunnel`）+ **pending RPC 机制**（同步 register 响应经 readLoop 分发，修复控制连接读写竞争）。
