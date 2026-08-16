@@ -39,7 +39,11 @@ type Client struct {
 	// Policy is the server-assigned policy (filled after handshake).
 	Policy protocol.Policy
 
+	// Backoff controls reconnect timing (default: 1s x2 max 60s +-20%).
+	Backoff BackoffConfig
+
 	tunnelClient *tunnel.Client
+	manager      *Manager
 	seq          uint64
 	missed       atomic.Int32
 	mu           sync.Mutex
@@ -69,9 +73,26 @@ func (c *Client) setupTunnels() error {
 	return nil
 }
 
-// Run connects, handshakes and maintains the control session until ctx is
-// cancelled or the connection fails (reconnect in Phase 6).
+// Run drives the connection manager: it repeatedly establishes sessions,
+// reconnecting with backoff on temporary errors, and returns a non-nil
+// error only for permanent failures (authentication, revocation, protocol).
 func (c *Client) Run(ctx context.Context) error {
+	backoff := c.Backoff
+	if backoff.Initial <= 0 {
+		backoff = DefaultBackoff()
+	}
+	m := &Manager{
+		Session: c.runSession,
+		Backoff: backoff,
+		Log:     c.Log,
+	}
+	c.manager = m
+	return m.Run(ctx)
+}
+
+// runSession establishes one control session: dial, handshake, tunnel
+// registration, heartbeat loop. Any error is classified by the manager.
+func (c *Client) runSession(ctx context.Context) error {
 	host, _, err := net.SplitHostPort(c.ServerAddr)
 	if err != nil {
 		return fmt.Errorf("clientcore: invalid server addr: %w", err)
@@ -84,12 +105,16 @@ func (c *Client) Run(ctx context.Context) error {
 		HandshakeTimeout: 10 * time.Second,
 	})
 	if err != nil {
-		return fmt.Errorf("clientcore: dial: %w", err)
+		return Classify(fmt.Errorf("clientcore: dial: %w", err))
 	}
 	defer conn.Close()
 	c.conn = conn
 	defer func() {
-		c.closeOnce.Do(func() {})
+		c.closeOnce.Do(func() {
+			if c.tunnelClient != nil {
+				c.tunnelClient.CloseAllDataConns()
+			}
+		})
 	}()
 
 	// handshake: client_hello
@@ -157,6 +182,12 @@ func (c *Client) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// graceful client shutdown: notify the server so it removes the
+			// public listeners and drains (04 §2 shutdown negotiation)
+			_ = conn.WriteFrame(protocol.MsgShutdown, c.nextSeq(), &protocol.Shutdown{
+				Reason:         "client shutdown",
+				DrainTimeoutMS: 5000,
+			})
 			return nil
 		case err := <-readErr:
 			return fmt.Errorf("clientcore: control connection lost: %w", err)
@@ -252,7 +283,7 @@ func (c *Client) readLoop() error {
 		case protocol.MsgOpenConnection:
 			c.handleOpenConnection(env)
 		case protocol.MsgShutdown:
-			return fmt.Errorf("server shutdown")
+			return ErrGracefulShutdown
 		default:
 			// unknown types are ignored (recoverable, §8)
 			c.Log.Warn("clientcore: ignoring message", "type", env.Type)

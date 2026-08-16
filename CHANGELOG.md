@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Added（Phase 6 — 重连、心跳完善、Graceful Shutdown、Connection Manager）
+
+- `internal/clientcore` Connection Manager：状态机（Disconnected/Connecting/Online/Draining/Stopped）；错误分类器（TLS/协议错误=永久、网络=临时）；重连循环（1s×2 上限 60s ±20% jitter，[reconnect] 可配，日志降频采样）；重连成功自动重注册全部隧道；被踢会话收到 fatal error 停止重连（防乒乓）；ctx cancel 时向 Server 发 shutdown 协商。
+- Server 侧：重复 client_id 踢旧会话（新会话优先 + 审计日志 + fatal 通知）；`shutdown` 协商（Client 发起→摘 Public Listeners→drain 30s 上限→强关残余）；数据连接跟踪（drain 落账）；SIGINT/SIGTERM 广播 shutdown 后优雅退出；**端口预留**（断开 60s 内原 client 可拿回、他人拒绝）。
+- cmd 信号处理：双端 SIGINT/SIGTERM 优雅退出（码 0），第二次信号强退（130）。
+- 测试：manager 退避/永久停止/优雅取消/退避增长/分类；重连重注册+转发恢复；踢旧会话；端口预留（owner 拿回、thief 拒绝）；client 发起 shutdown 摘 listener；**浸泡测试**（快速断连循环无 goroutine 泄漏，真实 client 多轮连接-转发-关闭无泄漏）。
+- 修复：manager 对 Session 错误未先分类导致 fatal 被当临时重连（乒乓根因）。
+- 文档：[docs/conn-manager-state.md](docs/conn-manager-state.md) 状态机。
+
 ### Added（Phase 5 — TCP Tunnel MVP）
 
 - `internal/tunnel`：Server Manager（注册/端口仲裁/Public Listener/conn_id=CSPRNG 128-bit pending 表 10s 超时清理/ClaimData 认领）；Client（回源 ACL allowed_targets 校验、解析-校验-dial 同 IP 防 DNS rebinding、mTLS 数据连接 + open_data 首帧）；splice 双向 io.CopyBuffer 32KiB + half-close 状态机（2 goroutine + owner，关闭集中、空闲 5min）。

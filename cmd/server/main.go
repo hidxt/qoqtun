@@ -240,6 +240,23 @@ func runServer(cfg *config.ServerConfig, logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// graceful shutdown: broadcast shutdown to clients, drain, then exit
+	go func() {
+		<-ctx.Done()
+		logger.Info("server shutting down, notifying clients")
+		sctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+		srv.BroadcastShutdown(sctx, "server shutdown", 30*time.Second)
+		_ = ln.Close()
+	}()
+	// second signal forces immediate exit
+	go func() {
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		<-ch // first signal consumed by NotifyContext
+		<-ch // second: force quit
+		os.Exit(130)
+	}()
 	logger.Info("server control plane starting", "addr", cfg.Listen.ControlAddr)
 	return srv.Serve(ctx, ln)
 }

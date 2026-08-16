@@ -255,3 +255,15 @@ func (m *Manager) TunnelCount() int {
 	defer m.mu.Unlock()
 	return len(m.tunnels)
 }
+
+// Ports returns the remote ports currently registered by this manager
+// (used for port reservations on disconnect).
+func (m *Manager) Ports() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]int, 0, len(m.ports))
+	for port := range m.ports {
+		out = append(out, port)
+	}
+	return out
+}

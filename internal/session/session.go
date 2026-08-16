@@ -17,6 +17,7 @@ var ErrExists = errors.New("session: client already connected")
 type ControlConn interface {
 	PeerID() string
 	WriteFrame(msgType string, seq uint64, payload any) error
+	Close() error
 }
 
 // Session tracks one connected client.

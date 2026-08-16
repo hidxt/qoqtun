@@ -43,7 +43,21 @@ type Server struct {
 	managersMu sync.Mutex
 	managers   map[string]*tunnel.Manager
 
+	// dataConns tracks in-flight data connections for drain accounting.
+	dataConns *dataConnTracker
+
+	// port reservations (port -> clientID) so a reconnecting client can
+	// reclaim its ports within a short window (Phase 6; 60s TTL).
+	reserveMu    sync.Mutex
+	reservations map[int]reservation
+
 	halfOpen *halfOpenTracker
+}
+
+// reservation is a temporary port hold for a disconnected client.
+type reservation struct {
+	clientID string
+	until    time.Time
 }
 
 // halfOpenTracker caps simultaneous unauthenticated connections per IP.
@@ -92,6 +106,12 @@ func (s *Server) Serve(ctx context.Context, ln *transport.Listener) error {
 	}
 	if s.managers == nil {
 		s.managers = make(map[string]*tunnel.Manager)
+	}
+	if s.dataConns == nil {
+		s.dataConns = newDataConnTracker()
+	}
+	if s.reservations == nil {
+		s.reservations = make(map[int]reservation)
 	}
 	s.Log.Info("control listener started", "addr", ln.Addr().String())
 
@@ -186,6 +206,8 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 		_ = conn.Close()
 		return
 	}
+	s.dataConns.add(od.ConnID)
+	defer s.dataConns.done(od.ConnID)
 	_ = conn.SetDeadline(time.Time{})
 	res := <-tunnel.Splice(publicConn, conn, 32*1024)
 	s.Log.Info("data connection closed", "conn_id", od.ConnID[:min(8, len(od.ConnID))],
@@ -219,12 +241,30 @@ func (s *Server) handleControlConn(ctx context.Context, conn *transport.Conn, ho
 		return
 	}
 
-	// single control connection per client
+	// single control connection per client: a duplicate client_id kicks the
+	// old session (new session wins, audit logged; 04 §1 one control conn).
 	sess := &session.Session{ClientID: peerID, Conn: conn}
 	if err := s.Sessions.Register(sess); err != nil {
-		_ = conn.WriteFrame(protocol.MsgError, 0,
-			protocol.NewError(protocol.ErrCodeAuthFailed, "client already connected", true))
-		return
+		if old, ok := s.Sessions.Get(peerID); ok {
+			s.Log.Warn("duplicate client_id: kicking old session", "client_id", peerID)
+			// send a fatal error first so the old client stops reconnecting
+			// (prevents kick ping-pong between two live processes)
+			if old.Conn != nil {
+				_ = old.Conn.WriteFrame(protocol.MsgError, 0,
+					protocol.NewError(protocol.ErrCodeAuthFailed, "replaced by a newer session", true))
+				_ = old.Conn.Close()
+			}
+			s.Sessions.Unregister(peerID)
+			if err2 := s.Sessions.Register(sess); err2 != nil {
+				_ = conn.WriteFrame(protocol.MsgError, 0,
+					protocol.NewError(protocol.ErrCodeAuthFailed, "client already connected", true))
+				return
+			}
+		} else {
+			_ = conn.WriteFrame(protocol.MsgError, 0,
+				protocol.NewError(protocol.ErrCodeAuthFailed, "client already connected", true))
+			return
+		}
 	}
 	defer s.Sessions.Unregister(peerID)
 	sess.Touch() // heartbeat supervisor starts from "now"
@@ -232,9 +272,15 @@ func (s *Server) handleControlConn(ctx context.Context, conn *transport.Conn, ho
 	// read-loop errors take over liveness detection
 	_ = conn.SetDeadline(time.Time{})
 
-	// per-client tunnel manager; cleaned up on disconnect
+	// per-client tunnel manager; cleaned up on disconnect with port
+	// reservations so a reconnecting client can reclaim its ports.
 	m := s.managerFor(peerID)
-	defer m.UnregisterAll()
+	defer func() {
+		for _, port := range m.Ports() {
+			s.reservePort(port, peerID, 60*time.Second)
+		}
+		m.UnregisterAll()
+	}()
 
 	// server_hello with the full policy
 	sh := protocol.ServerHello{
@@ -298,6 +344,7 @@ func readLoop(ctx context.Context, s *Server, conn *transport.Conn, sess *sessio
 		case protocol.MsgCloseConnection:
 			// accounting handled at the splice owner; ignore here
 		case protocol.MsgShutdown:
+			s.handleShutdownFromClient(conn, m, env)
 			return
 		default:
 			// unknown message type: ERR_PROTOCOL (recoverable per §8)
@@ -319,6 +366,12 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 	if err := protocol.ValidateRegisterTunnel(&req); err != nil {
 		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
 			Error: protocolErrToMsg(err),
+		})
+		return
+	}
+	if err := s.checkPortArbitration(req.RemotePort, sess.ClientID); err != nil {
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodePortInUse, Message: err.Error()},
 		})
 		return
 	}
@@ -372,6 +425,34 @@ func (s *Server) managerFor(clientID string) *tunnel.Manager {
 		s.managers[clientID] = m
 	}
 	return m
+}
+
+// reservePort holds a port for a disconnected client for ttl.
+func (s *Server) reservePort(port int, clientID string, ttl time.Duration) {
+	s.reserveMu.Lock()
+	defer s.reserveMu.Unlock()
+	s.reservations[port] = reservation{clientID: clientID, until: time.Now().Add(ttl)}
+}
+
+// checkPortArbitration rejects a port held by another client's reservation
+// (the owning client may reclaim it). Expired reservations are dropped.
+func (s *Server) checkPortArbitration(port int, clientID string) error {
+	s.reserveMu.Lock()
+	defer s.reserveMu.Unlock()
+	now := time.Now()
+	for p, r := range s.reservations {
+		if now.After(r.until) {
+			delete(s.reservations, p)
+		}
+	}
+	if r, ok := s.reservations[port]; ok {
+		if r.clientID != clientID {
+			return fmt.Errorf("remote port %d reserved by another client", port)
+		}
+		// own reservation: reclaim and clear
+		delete(s.reservations, port)
+	}
+	return nil
 }
 
 // Managers returns a snapshot of the per-client tunnel managers

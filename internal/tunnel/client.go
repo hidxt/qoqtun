@@ -24,9 +24,10 @@ type Client struct {
 	DialLocal func(ctx context.Context, ip string, port int) (net.Conn, error)
 	Log       *slog.Logger
 
-	mu      sync.Mutex
-	tunnels map[string]*TunnelConfig // tunnel_id
-	rules   []targetRule
+	mu        sync.Mutex
+	tunnels   map[string]*TunnelConfig // tunnel_id
+	dataConns map[*transport.Conn]struct{}
+	rules     []targetRule
 }
 
 // TunnelConfig is a locally registered tunnel.
@@ -57,6 +58,7 @@ func NewClient(serverAddr string, cas []*x509.Certificate, cert, key []byte, all
 		rules:          rules,
 		Log:            log,
 		tunnels:        make(map[string]*TunnelConfig),
+		dataConns:      make(map[*transport.Conn]struct{}),
 	}, nil
 }
 
@@ -129,9 +131,40 @@ func (c *Client) HandleOpenConnection(ctx context.Context, oc *protocol.OpenConn
 		dataConn.Close()
 		return err
 	}
+	c.trackData(dataConn)
+	defer c.untrackData(dataConn)
 	c.Log.Info("data connection established", "conn_id", oc.ConnID[:8], "tunnel", tc.Name)
 	<-Splice(origin, dataConn, 32*1024)
 	return nil
+}
+
+// trackData registers an active data connection so it can be torn down when
+// the control session ends.
+func (c *Client) trackData(conn *transport.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dataConns[conn] = struct{}{}
+}
+
+func (c *Client) untrackData(conn *transport.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.dataConns, conn)
+}
+
+// CloseAllDataConns forcibly closes every active data connection (invoked
+// when the control session drops).
+func (c *Client) CloseAllDataConns() {
+	c.mu.Lock()
+	conns := make([]*transport.Conn, 0, len(c.dataConns))
+	for conn := range c.dataConns {
+		conns = append(conns, conn)
+	}
+	c.dataConns = make(map[*transport.Conn]struct{})
+	c.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 // checkACL enforces the server-delivered allowed_targets on the origin.

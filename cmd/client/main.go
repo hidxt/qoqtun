@@ -224,6 +224,14 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 		"tunnels", len(cfg.Tunnels))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// second signal forces immediate exit
+	go func() {
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		<-ch // first signal consumed by NotifyContext
+		<-ch // second: force quit
+		os.Exit(130)
+	}()
 	return client.Run(ctx)
 }
 
