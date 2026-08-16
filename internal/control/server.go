@@ -42,6 +42,14 @@ type Server struct {
 	UDPMaxSessions int
 	UDPMaxPacket   int
 
+	// VhostPort is the shared HTTP Host-routing port (0 = disabled; http
+	// tunnels then degrade to dedicated ports).
+	VhostPort int
+	vhost     *tunnel.VhostTable
+	vhostLn   net.Listener
+	vhostMu   sync.Mutex
+	vhostRefs int
+
 	Sessions *session.Registry
 
 	// per-client tunnel managers (data-plane pairing).
@@ -117,6 +125,9 @@ func (s *Server) Serve(ctx context.Context, ln *transport.Listener) error {
 	}
 	if s.reservations == nil {
 		s.reservations = make(map[int]reservation)
+	}
+	if s.vhost == nil {
+		s.vhost = tunnel.NewVhostTable()
 	}
 	s.Log.Info("control listener started", "addr", ln.Addr().String())
 
@@ -230,6 +241,11 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 	s.dataConns.add(od.ConnID)
 	defer s.dataConns.done(od.ConnID)
 	_ = conn.SetDeadline(time.Time{})
+	// the public side may carry a claim deadline (vhost replay conns got a
+	// 10s claim timeout in OpenConnection); the splice owns liveness now
+	if publicConn != nil {
+		_ = publicConn.SetDeadline(time.Time{})
+	}
 	res := <-tunnel.Splice(publicConn, conn, 32*1024)
 	s.Log.Info("data connection closed", "conn_id", od.ConnID[:min(8, len(od.ConnID))],
 		"rx", res.BytesToA, "tx", res.BytesToB)
@@ -300,6 +316,14 @@ func (s *Server) handleControlConn(ctx context.Context, conn *transport.Conn, ho
 		for _, port := range m.Ports() {
 			s.reservePort(port, peerID, 60*time.Second)
 		}
+		// release every vhost host this client held (unregister goes
+		// through the same path on clean teardown)
+		for _, t := range m.Tunnels() {
+			if t.VhostHost != "" {
+				s.vhost.UnregisterTunnel(t.ID)
+			}
+		}
+		s.stopVhost()
 		m.UnregisterAll()
 	}()
 
@@ -390,6 +414,11 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 		})
 		return
 	}
+	// HTTP vhost mode: shared port + Host routing (remote_port == 0).
+	if req.Type == "http" && req.RemotePort == 0 && req.HTTP != nil && req.HTTP.Host != "" {
+		s.handleRegisterVhost(ctx, conn, sess, m, env, &req)
+		return
+	}
 	if err := s.checkPortArbitration(req.RemotePort, sess.ClientID); err != nil {
 		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
 			Error: &protocol.Error{Code: protocol.ErrCodePortInUse, Message: err.Error()},
@@ -435,10 +464,56 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 	}
 }
 
+// handleRegisterVhost registers an HTTP tunnel on the shared vhost port:
+// normalize + conflict-check the host, register the routing entry, then
+// start the shared listener (refcounted). The response carries the shared
+// port as the effective public port.
+func (s *Server) handleRegisterVhost(ctx context.Context, conn *transport.Conn, sess *session.Session, m *tunnel.Manager, env *protocol.Envelope, req *protocol.RegisterTunnel) {
+	host, err := tunnel.NormalizeHostName(req.HTTP.Host)
+	if err != nil {
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeNameInvalid, Message: "invalid http.host: " + err.Error()},
+		})
+		return
+	}
+	policy := policyFromConfig(s.Cfg)
+	t, err := m.AddVhostTunnel(ctx, req.Name, host, policy.MaxTunnels)
+	if err != nil {
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: mapRegisterErr(err), Message: err.Error()},
+		})
+		return
+	}
+	if err := s.vhost.Register(host, t.ID, sess.ClientID); err != nil {
+		m.Unregister(t.ID)
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeNameConflict, Message: "http.host already registered: " + host},
+		})
+		return
+	}
+	if err := s.startVhost(ctx); err != nil {
+		s.vhost.UnregisterTunnel(t.ID)
+		m.Unregister(t.ID)
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeInternal, Message: err.Error()},
+		})
+		return
+	}
+	_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+		TunnelID:  t.ID,
+		OK:        true,
+		Effective: &protocol.Effective{RemotePort: s.VhostPort},
+	})
+}
+
 func (s *Server) handleUnregisterTunnel(conn *transport.Conn, m *tunnel.Manager, env *protocol.Envelope) {
 	var req protocol.UnregisterTunnel
 	if err := env.DecodePayload(&req); err != nil {
 		return
+	}
+	if t, ok := m.TunnelByID(req.TunnelID); ok && t.VhostHost != "" {
+		s.vhost.UnregisterTunnel(req.TunnelID)
+		s.stopVhost()
 	}
 	m.Unregister(req.TunnelID)
 	_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
@@ -502,6 +577,15 @@ func (s *Server) checkPortArbitration(port int, clientID string) error {
 		delete(s.reservations, port)
 	}
 	return nil
+}
+
+// VhostCount returns the number of hosts in the vhost routing table
+// (diagnostics/tests).
+func (s *Server) VhostCount() int {
+	if s.vhost == nil {
+		return 0
+	}
+	return s.vhost.Count()
 }
 
 // Managers returns a snapshot of the per-client tunnel managers

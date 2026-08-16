@@ -102,6 +102,11 @@ func ValidateRegisterTunnel(r *RegisterTunnel) error {
 	if r.Type == "http" && r.RemotePort == 0 && (r.HTTP == nil || r.HTTP.Host == "") {
 		return ProtocolError("register_tunnel: http tunnel needs http.host when remote_port=0")
 	}
+	// https is a pure L4 passthrough alias: it always needs a dedicated
+	// public port (no vhost/SNI routing in V1, 04 §7).
+	if r.Type == "https" && r.RemotePort == 0 {
+		return ProtocolError("register_tunnel: https needs a dedicated remote_port (L4 passthrough)")
+	}
 	if err := validateLocalTarget(&r.Local); err != nil {
 		return err
 	}

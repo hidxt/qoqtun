@@ -237,6 +237,7 @@ func runServer(cfg *config.ServerConfig, logger *slog.Logger) error {
 		Log:              logger,
 		MaxHalfOpen:      8,
 		HandshakeTimeout: 10 * time.Second,
+		VhostPort:        cfg.Listen.HTTPVhostPort,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

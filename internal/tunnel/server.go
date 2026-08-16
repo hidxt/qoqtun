@@ -45,10 +45,11 @@ type Tunnel struct {
 	LocalIP    string
 	LocalPort  int
 
-	ln   net.Listener // tcp/http/https
-	udp  *udpServerState
-	chMu sync.Mutex
-	ch   net.Conn // active UDP data channel (type=udp)
+	ln        net.Listener // tcp/http/https
+	VhostHost string       // normalized vhost host (type=http vhost mode)
+	udp       *udpServerState
+	chMu      sync.Mutex
+	ch        net.Conn // active UDP data channel (type=udp)
 }
 
 // pendingConn is a public-side connection awaiting the client's data conn.
@@ -406,6 +407,46 @@ func (m *Manager) CleanupExpired(now time.Time) {
 			m.Log.Warn("tunnel: conn_id claim timeout", "conn_id", id)
 		}
 	}
+}
+
+// AddVhostTunnel registers an HTTP vhost tunnel: it occupies a slot in the
+// manager (for data-connection routing) but no public port — the shared
+// http_vhost_port listener on the Server routes by Host (04 §7).
+func (m *Manager) AddVhostTunnel(ctx context.Context, name, host string, maxTunnels int) (*Tunnel, error) {
+	if maxTunnels > 0 && m.TunnelCount() >= maxTunnels {
+		return nil, fmt.Errorf("tunnel limit reached (%d)", maxTunnels)
+	}
+	t := &Tunnel{
+		ID:         fmt.Sprintf("t_%d", m.nextSeq()),
+		Name:       name,
+		Type:       "http",
+		RemotePort: 0, // no dedicated port in vhost mode
+		VhostHost:  host,
+	}
+	m.mu.Lock()
+	m.tunnels[t.ID] = t
+	m.mu.Unlock()
+	m.Log.Info("vhost tunnel registered", "tunnel_id", t.ID, "name", name, "host", host)
+	return t, nil
+}
+
+// Tunnels returns a snapshot of all registered tunnels.
+func (m *Manager) Tunnels() []*Tunnel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Tunnel, 0, len(m.tunnels))
+	for _, t := range m.tunnels {
+		out = append(out, t)
+	}
+	return out
+}
+
+// TunnelByID returns the registered tunnel by id.
+func (m *Manager) TunnelByID(tunnelID string) (*Tunnel, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tunnels[tunnelID]
+	return t, ok
 }
 
 // TunnelCount returns the number of registered tunnels.
