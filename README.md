@@ -68,13 +68,22 @@ Windows / Linux / macOS × amd64/arm64 均可交叉编译（如 `GOOS=linux GOAR
 
 ## 快速开始
 
-> 全链路（`server ca init` → `server client create-token` → `client enroll` → `client run`）将在 Phase 3/5 完成后补齐；当前 Phase 1 提供配置校验：
+> 全链路（`client enroll` → `client run` → Tunnel 转发）将在 Phase 3/5 完成后补齐；当前可用：
 
 ```sh
 go run ./cmd/server check-config --config examples/server.example.toml   # 解析+校验+打印生效配置
 go run ./cmd/client check-config --config examples/client.example.toml   # 同上（敏感值脱敏）
 # 示例配置为 Linux 风格路径；Windows 部署请先修改 state_dir 为盘符绝对路径
 ```
+
+初始化身份（私钥永不落明文文件、永不离开设备）：
+
+```sh
+go run ./cmd/server ca init --config server.toml        # 生成 Root CA + 服务器证书（幂等，--force 覆盖）
+go run ./cmd/client cert init --csr-out client.csr      # 生成客户端私钥(入系统安全存储)+client_id+CSR
+```
+
+操作手册见 [docs/operations/pki.md](docs/operations/pki.md)。
 
 ## 文档
 

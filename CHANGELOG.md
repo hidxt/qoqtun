@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added（Phase 2 — PKI 与跨平台私钥安全存储）
+
+- `internal/pki`（纯标准库）：Ed25519 自签 Root CA（128-bit 随机序列号、CertSign|CRLSign）；PKCS#10 CSR（CN=`cl_`+base32 小写 client_id、OU=name）；客户端证书签发（CSR POP 校验、仅 Ed25519、CN 格式、随机序列号、ClientAuth EKU、NotBefore-5min、NotAfter 截断到 CA 期）；服务器证书（ServerAuth + SAN IP/DNS）；解析/校验/序列化/指纹（SHA-256 冒号格式）/到期判断；吊销列表与客户端登记（原子写 + 线程安全）。
+- `internal/platform/keystore`：`Store` 接口（Get/Set/Delete/List）+ 三实现——keyring（wincred/Keychain/SecretService）、file（0700 目录/0600 文件/属主校验/拒符号链接/Unix O_NOFOLLOW/原子写/并发安全）、mem（测试）；keyring 失败自动降级 file（warn 不含敏感信息）；`--keystore-backend auto|keyring|file` 偏好；Windows 仅当前用户 ACL（属主 SID 校验 + DACL）。
+- CLI：`server ca init`（幂等，`--force` 覆盖并警告）、`client cert init`（私钥入 keystore、client_id、CSR 输出，`--name/--note/--csr-out/--secrets-dir/--keystore-backend`）。
+- 测试：签发-解析-校验往返、篡改/错算法（RSA）/非法 CN 的 CSR 拒绝、50 张序列号唯一、NotAfter 截断、吊销持久化（0600）、keystore 契约（mem/file/keyring-file）、权限断言、符号链接攻击（Unix）、属主拒绝、keyring→file 降级。
+- 文档：[docs/operations/pki.md](docs/operations/pki.md) 操作手册初稿。
+- 依赖：新增 `99designs/keyring`、`golang.org/x/sys`；jose2go 提升至 v1.7.0（修复 GO-2023-2409/GO-2025-4123）。
+- CI：Go 版本升至 1.26（覆盖标准库 GO-2026-5972，asn1 递归 DoS）。
+
 ### Added（Phase 1 — 项目骨架、Config、Logging、CLI 基础）
 
 - Monorepo 骨架：`go.mod`（Go 1.22，模块 `github.com/hidxt/qoqtun`）、`cmd/server`、`cmd/client`（cobra 薄壳）、`internal/config`、`internal/logging`、`internal/platform`（占位）。
