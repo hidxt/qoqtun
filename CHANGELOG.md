@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+### Added（Phase 15 — 性能、压力、Race、Fuzz）
+- 基准（testing.B，包内）：TCP 吞吐（1/100/1000 并发 × 64KiB 回环，1=89MB/s、100=244MB/s）、隧道内建连延迟 p50≈3ms、UDP server session 248ns/op、Host 嗅探 2.67µs/op；结果与方法入 docs/perf/baseline.md（环境/局限/回归阈值；回环数据不宣传）。
+- 浸泡与攻击场景：慢读混合测试（30 慢读者不读 + 正常流量可用）、既有 slowloris/soak（goroutine 回落断言）；10k/10min 与 1000 并发标注 CI/Linux 承担（Windows 资源局限记录）。
+- Fuzz 收口：新增 FuzzLoadClientConfig / FuzzLoadServerConfig（TOML 解析），连同 FuzzDecodeFrame/FuzzHostSniff 各 60s+ 无崩溃；语料入库 testdata/fuzz。
+- 无任何为性能削弱安全/限额/超时的改动（性能第五优先级）。
+
 ### Added（Phase 14 — 跨平台集成测试与发布工程就绪）
 - CI 矩阵（.github/workflows/ci.yml）：PR 主平台（windows/linux/macos amd64：vet+test+race+交叉编译+secret scan+e2e）；nightly 全矩阵 + desktop 构建（Linux 装 webkit 依赖，文档说明）。
 - e2e/权限脚本：scripts/e2e.sh（完整生命周期，本机 8/8 稳定）；scripts/privilege-check.sh（非 root 运行、setcap 低端口绑定、root 守卫提示）。

@@ -340,3 +340,41 @@ func roundTripNoFatal(publicPort int, payload []byte) bool {
 	}
 	return string(got) == string(payload)
 }
+
+// TestPolicySlowReaderAvailability: connections that send then never read
+// (write-side backpressure) must not starve legitimate traffic.
+func TestPolicySlowReaderAvailability(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.close()
+	echoPort, stopEcho := startEchoServer(t)
+	defer stopEcho()
+
+	_, cancel, errCh := startClient(t, env, []clientcore.TunnelSpec{
+		{Name: "sr", Type: "tcp", RemotePort: 20090, LocalIP: "127.0.0.1", LocalPort: echoPort, Enabled: true},
+	})
+	defer waitClientExit(cancel, errCh)
+	waitTunnelCount(t, env, 1, 5*time.Second)
+
+	// 30 slow readers: send 1MB, never read
+	var slow []net.Conn
+	for i := 0; i < 30; i++ {
+		c, err := net.Dial("tcp", "127.0.0.1:20090")
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := make([]byte, 1<<20)
+		_, _ = c.Write(payload) // server side will buffer/backpressure
+		slow = append(slow, c)
+	}
+	defer func() {
+		for _, c := range slow {
+			_ = c.Close()
+		}
+	}()
+
+	// legitimate traffic still works
+	for i := 0; i < 5; i++ {
+		roundTrip(t, 20090, []byte("ok"))
+		time.Sleep(150 * time.Millisecond)
+	}
+}
