@@ -15,9 +15,11 @@ import (
 
 	"github.com/hidxt/qoqtun/internal/config"
 	"github.com/hidxt/qoqtun/internal/protocol"
+	"github.com/hidxt/qoqtun/internal/security"
 	"github.com/hidxt/qoqtun/internal/session"
 	"github.com/hidxt/qoqtun/internal/transport"
 	"github.com/hidxt/qoqtun/internal/tunnel"
+	"golang.org/x/time/rate"
 )
 
 // Server is the control-plane listener.
@@ -49,6 +51,20 @@ type Server struct {
 	vhostLn   net.Listener
 	vhostMu   sync.Mutex
 	vhostRefs int
+
+	// security machinery (Phase 9, T6/T7/T9/T10).
+	policy    protocol.Policy // resolved policy (from Cfg at Serve start)
+	polMu     sync.Mutex
+	clientSem map[string]*security.Semaphore   // per-client conn quota
+	tunnelSem map[string]*security.Semaphore   // per-tunnel conn quota
+	clientBW  map[string]*security.TokenBucket // per-client bandwidth
+	tunnelBW  map[string]*security.TokenBucket // per-tunnel bandwidth
+	regLim    map[string]*rate.Limiter         // per-client register rate
+	ipGate    *security.IPGate                 // per public-IP conn gate
+
+	// IP gate tunables (defaults suit production; tests raise them).
+	IPGateMaxConns   int
+	IPGateRatePerSec float64
 
 	Sessions *session.Registry
 
@@ -129,6 +145,35 @@ func (s *Server) Serve(ctx context.Context, ln *transport.Listener) error {
 	if s.vhost == nil {
 		s.vhost = tunnel.NewVhostTable()
 	}
+	if s.policy.AllowedPorts == nil {
+		s.policy = policyFromConfig(s.Cfg)
+	}
+	if s.clientSem == nil {
+		s.clientSem = make(map[string]*security.Semaphore)
+	}
+	if s.tunnelSem == nil {
+		s.tunnelSem = make(map[string]*security.Semaphore)
+	}
+	if s.clientBW == nil {
+		s.clientBW = make(map[string]*security.TokenBucket)
+	}
+	if s.tunnelBW == nil {
+		s.tunnelBW = make(map[string]*security.TokenBucket)
+	}
+	if s.regLim == nil {
+		s.regLim = make(map[string]*rate.Limiter)
+	}
+	if s.ipGate == nil {
+		maxConns := s.IPGateMaxConns
+		if maxConns <= 0 {
+			maxConns = 16
+		}
+		ratePerSec := s.IPGateRatePerSec
+		if ratePerSec <= 0 {
+			ratePerSec = 20
+		}
+		s.ipGate = security.NewIPGate(maxConns, ratePerSec)
+	}
 	s.Log.Info("control listener started", "addr", ln.Addr().String())
 
 	go func() {
@@ -166,12 +211,6 @@ func (s *Server) handleConn(ctx context.Context, conn *transport.Conn) {
 	if err != nil {
 		host = conn.RemoteAddr().String()
 	}
-	if !s.halfOpen.tryAcquire(host, s.MaxHalfOpen) {
-		s.Log.Warn("control: half-open limit exceeded", "ip", host)
-		_ = conn.Close()
-		return
-	}
-	defer s.halfOpen.release(host)
 
 	peerID := conn.PeerID()
 	if peerID == "" {
@@ -196,8 +235,19 @@ func (s *Server) handleConn(ctx context.Context, conn *transport.Conn) {
 	case protocol.MsgOpenData:
 		// data connections own their lifecycle (splice closeBoth / UDP
 		// channel ownership); handleConn must not close them here.
+		// The half-open cap bounds only control-plane hello floods (T9);
+		// data connections are already mTLS-authenticated and must never
+		// be throttled by it.
 		s.handleDataConn(ctx, conn, peerID, env)
 	case protocol.MsgClientHello:
+		// control-plane half-open cap: bounds concurrent hello floods
+		// (authenticated but not yet validated) per source IP
+		if !s.halfOpen.tryAcquire(host, s.MaxHalfOpen) {
+			s.Log.Warn("control: half-open limit exceeded", "ip", host)
+			_ = conn.Close()
+			return
+		}
+		defer s.halfOpen.release(host)
 		defer conn.Close() // control connection owned by this goroutine
 		s.handleControlConn(ctx, conn, host, peerID, env)
 	default:
@@ -234,12 +284,21 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 			_ = publicConn.Close() // not used for UDP (session table only)
 		}
 		_ = conn.SetDeadline(time.Time{})
+		if !s.acquireDataQuota(peerID, t.ID) {
+			s.Log.Warn("udp channel quota exceeded", "client_id", peerID, "tunnel", t.ID)
+			_ = conn.Close()
+			return
+		}
 		m := s.managerFor(peerID)
-		m.SetUDPChannel(ctx, t, conn)
+		m.SetUDPChannel(ctx, t, security.NewRateLimitedConn(conn,
+			s.clientBucket(peerID), s.tunnelBucket(t.ID)))
 		return
 	}
 	s.dataConns.add(od.ConnID)
 	defer s.dataConns.done(od.ConnID)
+	// release the per-client/per-tunnel quota held by the public side
+	// (acquired in onOpen / handleVhostConn)
+	defer s.releaseDataQuota(peerID, t.ID)
 	_ = conn.SetDeadline(time.Time{})
 	// the public side may carry a claim deadline (vhost replay conns got a
 	// 10s claim timeout in OpenConnection); the splice owns liveness now
@@ -322,8 +381,10 @@ func (s *Server) handleControlConn(ctx context.Context, conn *transport.Conn, ho
 			if t.VhostHost != "" {
 				s.vhost.UnregisterTunnel(t.ID)
 			}
+			s.tunnelTeardown(t.ID)
 		}
 		s.stopVhost()
+		s.cleanupSecurity(peerID)
 		m.UnregisterAll()
 	}()
 
@@ -370,12 +431,21 @@ func superviseHeartbeat(ctx context.Context, s *Server, conn *transport.Conn, se
 
 // readLoop consumes control messages and manages tunnels.
 func readLoop(ctx context.Context, s *Server, conn *transport.Conn, sess *session.Session, m *tunnel.Manager) {
+	msgLim := newCtrlMsgLimiter()
 	for {
 		env, err := protocol.ReadFrame(conn)
 		if err != nil {
 			return
 		}
 		sess.Touch()
+		// per-connection control-message flood guard (T9): over the cap the
+		// connection is dropped with ERR_RATE_LIMITED
+		if !msgLim.Allow() {
+			s.Log.Warn("control message rate exceeded", "client_id", sess.ClientID)
+			_ = conn.WriteFrame(protocol.MsgError, env.Seq,
+				protocol.NewError(protocol.ErrCodeRateLimited, "control message rate exceeded", true))
+			return
+		}
 		switch env.Type {
 		case protocol.MsgPing:
 			var p protocol.Ping
@@ -385,7 +455,7 @@ func readLoop(ctx context.Context, s *Server, conn *transport.Conn, sess *sessio
 		case protocol.MsgRegisterTunnel:
 			s.handleRegisterTunnel(ctx, conn, sess, m, env)
 		case protocol.MsgUnregisterTunnel:
-			s.handleUnregisterTunnel(conn, m, env)
+			s.handleUnregisterTunnel(conn, m, sess, env)
 		case protocol.MsgCloseConnection:
 			// accounting handled at the splice owner; ignore here
 		case protocol.MsgShutdown:
@@ -414,6 +484,23 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 		})
 		return
 	}
+	// per-client register/unregister frequency (T9)
+	if !s.checkRegisterRate(sess.ClientID) {
+		s.Log.Warn("register rate limited", "client_id", sess.ClientID, "name", req.Name)
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeRateLimited, Message: "register frequency exceeded"},
+		})
+		return
+	}
+	// server-side allowed_targets enforcement at registration (T6):
+	// the client-declared local origin must be inside the policy allow-list
+	if err := s.checkTargetAllowed(req.Local); err != nil {
+		s.Log.Warn("target not allowed", "client_id", sess.ClientID, "name", req.Name, "error", err)
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeTargetNotAllowed, Message: err.Error()},
+		})
+		return
+	}
 	// HTTP vhost mode: shared port + Host routing (remote_port == 0).
 	if req.Type == "http" && req.RemotePort == 0 && req.HTTP != nil && req.HTTP.Host != "" {
 		s.handleRegisterVhost(ctx, conn, sess, m, env, &req)
@@ -427,9 +514,28 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 	}
 	policy := policyFromConfig(s.Cfg)
 	onOpen := func(t *tunnel.Tunnel, publicConn net.Conn) {
-		connID, err := m.OpenConnection(t, publicConn, 10*time.Second)
-		if err != nil {
+		// per public-IP front-line gate (T9): rate + concurrency
+		ip, _, _ := net.SplitHostPort(publicConn.RemoteAddr().String())
+		if !s.ipGate.Allow(ip) {
+			s.Log.Warn("public conn per-IP limit", "ip", ip, "tunnel", t.ID)
 			_ = publicConn.Close()
+			return
+		}
+		defer s.ipGate.Release(ip)
+		// per-client + per-tunnel concurrency quotas (T9): fail-fast
+		if !s.acquireDataQuota(sess.ClientID, t.ID) {
+			s.Log.Warn("connection quota exceeded", "client_id", sess.ClientID, "tunnel", t.ID)
+			_ = publicConn.Close()
+			return
+		}
+		// bandwidth shaping: per-client + per-tunnel token buckets
+		// (release happens at the splice owner, handleDataConn)
+		wrapped := security.NewRateLimitedConn(publicConn,
+			s.clientBucket(sess.ClientID), s.tunnelBucket(t.ID))
+		connID, err := m.OpenConnection(t, wrapped, 10*time.Second)
+		if err != nil {
+			s.releaseDataQuota(sess.ClientID, t.ID)
+			_ = wrapped.Close()
 			return
 		}
 		host, _, _ := net.SplitHostPort(publicConn.RemoteAddr().String())
@@ -506,15 +612,22 @@ func (s *Server) handleRegisterVhost(ctx context.Context, conn *transport.Conn, 
 	})
 }
 
-func (s *Server) handleUnregisterTunnel(conn *transport.Conn, m *tunnel.Manager, env *protocol.Envelope) {
+func (s *Server) handleUnregisterTunnel(conn *transport.Conn, m *tunnel.Manager, sess *session.Session, env *protocol.Envelope) {
 	var req protocol.UnregisterTunnel
 	if err := env.DecodePayload(&req); err != nil {
+		return
+	}
+	if !s.checkRegisterRate(sess.ClientID) {
+		_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
+			Error: &protocol.Error{Code: protocol.ErrCodeRateLimited, Message: "unregister frequency exceeded"},
+		})
 		return
 	}
 	if t, ok := m.TunnelByID(req.TunnelID); ok && t.VhostHost != "" {
 		s.vhost.UnregisterTunnel(req.TunnelID)
 		s.stopVhost()
 	}
+	s.tunnelTeardown(req.TunnelID)
 	m.Unregister(req.TunnelID)
 	_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, &protocol.RegisterTunnelResp{
 		TunnelID: req.TunnelID,
@@ -533,7 +646,9 @@ func (s *Server) managerFor(clientID string) *tunnel.Manager {
 		m.UDPMaxSessions = s.UDPMaxSessions
 		m.UDPMaxPacket = s.UDPMaxPacket
 		m.OnUDPChannelClosed = func(t *tunnel.Tunnel) {
-			// pre-open a replacement UDP channel (Phase 6 reconnect path)
+			// release the quota held for this channel, then pre-open a
+			// replacement (Phase 6 reconnect path)
+			s.releaseDataQuota(clientID, t.ID)
 			sess, ok := s.Sessions.Get(clientID)
 			if !ok || sess.Conn == nil {
 				return
@@ -577,6 +692,12 @@ func (s *Server) checkPortArbitration(port int, clientID string) error {
 		delete(s.reservations, port)
 	}
 	return nil
+}
+
+// SetPolicyForTests overrides the resolved policy (integration tests only;
+// production resolves it from the config at Serve start).
+func (s *Server) SetPolicyForTests(p protocol.Policy) {
+	s.policy = p
 }
 
 // VhostCount returns the number of hosts in the vhost routing table

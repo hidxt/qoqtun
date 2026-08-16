@@ -16,6 +16,7 @@ import (
 	"log/slog"
 
 	"github.com/hidxt/qoqtun/internal/clientcore"
+	"github.com/hidxt/qoqtun/internal/protocol"
 )
 
 // freePort grabs an ephemeral port by listening and closing it.
@@ -387,28 +388,17 @@ func TestTunnelGoroutineReclaim(t *testing.T) {
 func TestACLRejection(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.close()
-	// server policy allows 127.0.0.0/8; a tunnel to 192.0.2.1 must be
-	// rejected by the client before dialing
+	// server policy allows 127.0.0.0/8 (testEnv). Since Phase 9 the
+	// server enforces allowed_targets at registration (T6): a tunnel to
+	// an out-of-ACL origin is refused with ERR_TARGET_NOT_ALLOWED.
 	echoPort, stopEcho := startEchoServer(t)
 	defer stopEcho()
 
-	port := freePortInRange(t)
-	_, cancel, errCh := startClient(t, env, []clientcore.TunnelSpec{
-		{Name: "bad", Type: "tcp", RemotePort: port, LocalIP: "192.0.2.1", LocalPort: echoPort, Enabled: true},
-	})
-	defer waitClientExit(cancel, errCh)
-	// server still accepts registration (ACL is enforced at data time);
-	// the connection attempt must fail server-side
-	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Skip("port not listening (registration rejected)")
-	}
+	conn, _ := dialControl(t, env)
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	if _, err := conn.Write([]byte("x")); err == nil {
-		buf := make([]byte, 1)
-		if _, rerr := conn.Read(buf); rerr == nil {
-			t.Fatalf("connection must not succeed for out-of-ACL origin: %s", string(buf))
-		}
+	resp := registerRaw(t, conn, "bad", "tcp", freePortInRange(t),
+		protocol.LocalTarget{IP: "192.0.2.1", Port: echoPort}, "")
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrCodeTargetNotAllowed {
+		t.Fatalf("out-of-ACL origin must be refused at registration, got %+v", resp)
 	}
 }

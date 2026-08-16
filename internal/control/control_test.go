@@ -67,6 +67,11 @@ func newTestEnv(t *testing.T) *testEnv {
 		MaxHalfOpen:      8,
 		HandshakeTimeout: 5 * time.Second,
 		Sessions:         reg,
+		// tests hammer loopback with 100+ concurrent connections; the
+		// per-IP gate would throttle them (its limits are covered by the
+		// security package unit tests)
+		IPGateMaxConns:   4096,
+		IPGateRatePerSec: 100000,
 	}
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

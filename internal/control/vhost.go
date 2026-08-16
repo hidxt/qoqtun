@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hidxt/qoqtun/internal/protocol"
+	"github.com/hidxt/qoqtun/internal/security"
 	"github.com/hidxt/qoqtun/internal/tunnel"
 )
 
@@ -89,10 +90,19 @@ func (s *Server) handleVhostConn(ctx context.Context, raw net.Conn) {
 	_ = raw.SetReadDeadline(time.Time{}) // sniff done; splice owns liveness
 	// replay the consumed head verbatim, then pure byte passthrough
 	replay := tunnel.NewReplayConn(raw, res.Prefix, bufio.NewReader(res.Rest))
-	connID, err := m.OpenConnection(t, replay, 10*time.Second)
-	if err != nil {
+	// per-client + per-tunnel quotas and bandwidth shaping (T9)
+	if !s.acquireDataQuota(clientID, t.ID) {
+		s.Log.Warn("vhost connection quota exceeded", "client_id", clientID, "tunnel", t.ID)
 		tunnel.WriteHTTPError(raw, 503, "Tunnel Busy")
 		_ = replay.Close()
+		return
+	}
+	wrapped := security.NewRateLimitedConn(replay, s.clientBucket(clientID), s.tunnelBucket(t.ID))
+	connID, err := m.OpenConnection(t, wrapped, 10*time.Second)
+	if err != nil {
+		s.releaseDataQuota(clientID, t.ID)
+		tunnel.WriteHTTPError(raw, 503, "Tunnel Busy")
+		_ = wrapped.Close()
 		return
 	}
 	sess, ok := s.Sessions.Get(clientID)

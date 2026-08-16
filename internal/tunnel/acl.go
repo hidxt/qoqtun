@@ -74,6 +74,16 @@ func parseTarget(s string) (targetRule, error) {
 }
 
 // Allows reports whether ip:port is inside the allow-list.
+// TargetsAllow reports whether (ip, port) is admitted by the raw
+// allowed_targets entries. Unparsable entries deny (fail-closed).
+func TargetsAllow(entries []string, ip net.IP, port int) bool {
+	rules, err := ParseTargets(entries)
+	if err != nil {
+		return false
+	}
+	return Allows(rules, ip, port)
+}
+
 func Allows(rules []targetRule, ip net.IP, port int) bool {
 	for _, r := range rules {
 		if r.network.Contains(ip) {

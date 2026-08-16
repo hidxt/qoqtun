@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/hidxt/qoqtun/internal/control"
 	"github.com/hidxt/qoqtun/internal/logging"
 	"github.com/hidxt/qoqtun/internal/pki"
+	"github.com/hidxt/qoqtun/internal/security"
 	"github.com/hidxt/qoqtun/internal/transport"
 	"github.com/spf13/cobra"
 )
@@ -162,7 +164,12 @@ func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool, sans []
 }
 
 func newRunCmd() *cobra.Command {
-	var configPath string
+	var (
+		configPath string
+		allowRoot  bool
+		allowLowFD bool
+		pprofAddr  string
+	)
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the server control plane (mTLS + tunnel listeners)",
@@ -175,16 +182,48 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runServer(cfg, logger)
+			if err := applyStartupGuards(cfg, allowRoot, allowLowFD); err != nil {
+				return err
+			}
+			return runServer(cfg, logger, pprofAddr)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to server.toml")
+	cmd.Flags().BoolVar(&allowRoot, "allow-root", false, "allow running as root/administrator")
+	cmd.Flags().BoolVar(&allowLowFD, "allow-low-fdlimit", false, "allow running below the recommended open-file limit")
+	cmd.Flags().StringVar(&pprofAddr, "pprof", "", "pprof listen address (127.0.0.1 only, e.g. 127.0.0.1:6060)")
 	return cmd
+}
+
+// applyStartupGuards enforces the resource guards (T10): root detection and
+// the RLIMIT_NOFILE check. Both are injectable via the security package.
+func applyStartupGuards(cfg *config.ServerConfig, allowRoot, allowLowFD bool) error {
+	if security.IsRoot() && !allowRoot {
+		return security.ErrRootDenied()
+	}
+	est := security.EstimatedFDLimit(cfg.Policy.MaxConnsPerClient, cfg.Policy.MaxConnsPerTunnel, 64)
+	chk := security.CheckFDLimit(est)
+	if chk.BelowLimit && !allowLowFD {
+		return security.ErrInsufficientFD(chk)
+	}
+	return nil
 }
 
 // runServer loads the PKI materials and serves the control plane until
 // interrupted.
-func runServer(cfg *config.ServerConfig, logger *slog.Logger) error {
+func runServer(cfg *config.ServerConfig, logger *slog.Logger, pprofAddr string) error {
+	if pprofAddr != "" {
+		// pprof is off by default; when enabled it binds 127.0.0.1 only
+		// (T10: diagnostics endpoint, never exposed publicly)
+		host, _, err := net.SplitHostPort(pprofAddr)
+		if err != nil || host != "127.0.0.1" {
+			return fmt.Errorf("--pprof must bind 127.0.0.1 (got %q)", pprofAddr)
+		}
+		go func() {
+			logger.Info("pprof listening", "addr", pprofAddr)
+			_ = http.ListenAndServe(pprofAddr, nil)
+		}()
+	}
 	caCertPEM, err := os.ReadFile(filepath.Join(cfg.StateDir, "ca", "ca.crt"))
 	if err != nil {
 		return fmt.Errorf("load CA cert (run `ca init` first): %w", err)

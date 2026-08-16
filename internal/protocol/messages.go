@@ -22,12 +22,14 @@ type ServerHello struct {
 
 // Policy is the server-side per-client policy.
 type Policy struct {
-	AllowedPorts   []string  `json:"allowed_ports"`
-	MaxTunnels     int       `json:"max_tunnels"`
-	MaxConns       int       `json:"max_conns"`
-	BandwidthBPS   int64     `json:"bandwidth_bps"`
-	UDP            UDPPolicy `json:"udp"`
-	AllowedTargets []string  `json:"allowed_targets"`
+	AllowedPorts       []string  `json:"allowed_ports"`
+	MaxTunnels         int       `json:"max_tunnels"`
+	MaxConns           int       `json:"max_conns"`
+	MaxConnsTunnel     int       `json:"max_conns_tunnel,omitempty"`
+	BandwidthBPS       int64     `json:"bandwidth_bps"`
+	BandwidthTunnelBPS int64     `json:"bandwidth_tunnel_bps,omitempty"`
+	UDP                UDPPolicy `json:"udp"`
+	AllowedTargets     []string  `json:"allowed_targets"`
 }
 
 // UDPPolicy bounds the per-tunnel UDP data channel (v1: UDP-in-TCP).
