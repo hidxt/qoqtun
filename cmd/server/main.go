@@ -27,6 +27,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is injected at build time via -ldflags "-X main.version=vX.Y.Z".
+var version = "dev"
+
+// versionCmd prints the version.
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "qoqtun-server %s\n", version)
+		},
+	}
+}
+
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -41,7 +55,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newRunCmd(), newCheckConfigCmd(), newCACmd(), newStatusCmd())
+	root.AddCommand(newVersionCmd(), newRunCmd(), newCheckConfigCmd(), newCACmd(), newStatusCmd())
 	root.AddCommand(newEnrollCmds()...)
 	return root
 }

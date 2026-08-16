@@ -1,0 +1,18 @@
+# qoqtun server example (copy to your server)
+state_dir = "/var/lib/qoqtun/state"          # Windows: C:/qoqtun/state
+
+[listen]
+control_addr = "0.0.0.0:7000"                # control plane (mTLS)
+enroll_addr = "0.0.0.0:7001"                 # enrollment (token)
+
+[policy]
+allowed_ports = ["20000-29999"]              # public ports clients may claim
+max_tunnels_per_client = 16
+max_conns_per_client = 256
+max_conns_per_tunnel = 128
+allowed_targets = ["10.0.0.0/8:*", "192.168.0.0/16:*"]  # client-side origins
+
+[heartbeat]
+interval_s = 15
+timeout_s = 10
+miss_threshold = 2

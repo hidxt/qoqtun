@@ -1,0 +1,19 @@
+# qoqtun client example (copy to each device)
+server_addr = "your-server.example.com:7000"   # control plane address
+
+[[tunnels]]
+name = "web"
+type = "http"
+remote_port = 0                                # 0 = vhost on the shared port
+http_host = "app.example.com"
+local_ip = "127.0.0.1"
+local_port = 8080
+enabled = true
+
+[[tunnels]]
+name = "ssh"
+type = "tcp"
+remote_port = 22000
+local_ip = "127.0.0.1"
+local_port = 22
+enabled = true
