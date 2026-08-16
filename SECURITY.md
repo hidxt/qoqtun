@@ -26,6 +26,12 @@ qoqtun 是高安全性开源内网穿透软件。本文档汇总安全模型、�
 
 每一条缓解都必须有实现 + 自动化测试证据（阶段验收强制）。
 
+## 安全审计
+
+- 威胁模型逐项核对：[docs/security/audit-checklist.md](docs/security/audit-checklist.md)
+- 审计报告（范围/方法/发现/定级/整改/残余风险）：[docs/security/audit-report.md](docs/security/audit-report.md)
+- 已定级接受项：[docs/security/known-limitations.md](docs/security/known-limitations.md)
+
 ## 受支持的版本
 
 > 占位：V1.0.0 发布后填写（例如"仅支持最新稳定版；旧版本安全修复以变更日志为准"）。

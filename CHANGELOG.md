@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Added（Phase 16 — 安全审计）
+- T1–T18 威胁模型逐项核对（docs/security/audit-checklist.md：实现+测试证据×状态），以攻击者剧本驱动 PKI/认证/ACL/路径/日志/并发专项审查。
+- 工具链：govulncheck（3 个标准库漏洞需 Go 1.26.6，CI 已用 1.26 补丁版）、go mod verify、os/exec 生产引用=0、依赖白名单对照、secret scan。
+- docs/security/audit-report.md（范围/方法/发现/定级/整改/残余风险）；docs/security/known-limitations.md（接受项）。
+- SECURITY.md 更新为最终版（含审计链接）。
+- 定级：P0=0；P1 中 2 项（配置兼容、注册帧序竞态）已在 Phase 14 修复；标准库漏洞记录为版本升级事项。
+
 ### Added（Phase 15 — 性能、压力、Race、Fuzz）
 - 基准（testing.B，包内）：TCP 吞吐（1/100/1000 并发 × 64KiB 回环，1=89MB/s、100=244MB/s）、隧道内建连延迟 p50≈3ms、UDP server session 248ns/op、Host 嗅探 2.67µs/op；结果与方法入 docs/perf/baseline.md（环境/局限/回归阈值；回环数据不宣传）。
 - 浸泡与攻击场景：慢读混合测试（30 慢读者不读 + 正常流量可用）、既有 slowloris/soak（goroutine 回落断言）；10k/10min 与 1000 并发标注 CI/Linux 承担（Windows 资源局限记录）。
