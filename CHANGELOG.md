@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added（Phase 13 — Desktop UI，Stitch 设计包驱动）
+- Stitch 资产盘点入库（docs/desktop/stitch-inventory.md：13 页面/主题 token/组件/缺口映射）；设计语言 Terra「Rooted Warmth」。
+- 前端本地化：Tailwind play CDN 本地化（离线）、Inter/JetBrains Mono woff2 打包、无 CDN/无新 npm 依赖、无遥测。
+- 完整 SPA（index.html + app.js）：13 视图全部接线 coreapi——状态（连接/流量/隧道摘要）、隧道管理（表格/搜索/启停/删除确认）、新建/编辑（类型切换/校验/错误回显）、服务器配置、设备入网（Token 安全输入 → coreapi.Enroll）、证书与身份（到期倒计时/keystore）、流量统计、日志（脱敏）、设置（深色主题）、断线/过期/空状态。
+- coreapi 新增 `Enroll`（生成密钥入 keystore → CSR → 签发 → 持久化状态；Token 仅内存）。
+- docs/desktop/fidelity-checklist.md（还原度走查 + 偏差记录）+ user-guide.md。
+- 已知偏差记录：日志原始流/开机启动开关/uptime 为后续接线项（详见 checklist）。
+
 ### Added（Phase 12 — Desktop Core：Wails 骨架与 coreapi）
 - `internal/coreapi`：Desktop 唯一入口（薄壳门面）——生命周期 Start/Stop/Status、Tunnel CRUD（Upsert/Delete 写回 client.toml 走 config 校验）、Config Get/Update（校验+持久化）、Identity（仅元数据，无密钥/证书/Token）、Stats（metrics 快照）、Events（无订阅泄漏）。全部输入校验与 config 同源。
 - `cmd/desktop`：Wails v2 工程（绑定 coreapi；最小静态前端验证绑定——状态/身份/统计/隧道面板，无任何网络/TLS/密钥代码）。依赖白名单新增 wails/v2。
