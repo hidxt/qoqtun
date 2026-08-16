@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 )
 
 // idRe restricts store ids to safe characters (no path separators,
@@ -125,7 +127,7 @@ func (s *FileStore) Set(id string, data []byte) error {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("keystore: %s is a symlink (refusing to overwrite)", id)
 	}
-	if err := atomicWrite(s.dir, path, data, 0o600); err != nil {
+	if err := atomicfile.Write(path, data, 0o600); err != nil {
 		return fmt.Errorf("keystore: set %s: %w", id, err)
 	}
 	if err := setOwnerOnlyACL(path); err != nil { // Windows: 0600-equivalent ACL
@@ -171,37 +173,6 @@ func (s *FileStore) List() ([]string, error) {
 	return ids, nil
 }
 
-// atomicWrite creates a temp file in the same directory (0600), fsyncs it,
-// and renames it over path.
-func atomicWrite(dir, path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	tmpName = ""
-	return nil
-}
+// atomicWrite is provided by internal/platform/atomicfile (same-directory
+// temp file, fsync, rename) for a single secure implementation of atomic
+// writes across all sensitive state files.

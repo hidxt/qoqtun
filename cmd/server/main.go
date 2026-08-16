@@ -31,6 +31,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.AddCommand(newRunCmd(), newCheckConfigCmd(), newCACmd())
+	root.AddCommand(newEnrollCmds()...)
 	return root
 }
 
@@ -44,6 +45,7 @@ func newCACmd() *cobra.Command {
 	}
 	var configPath string
 	var force bool
+	var sans []string
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize the Root CA and server certificate in state_dir",
@@ -53,17 +55,19 @@ func newCACmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runCAInit(cmd, cfg, force)
+			return runCAInit(cmd, cfg, force, sans)
 		},
 	}
 	initCmd.Flags().StringVar(&configPath, "config", "", "path to server.toml")
 	initCmd.Flags().BoolVar(&force, "force", false,
 		"overwrite an existing CA (warning: invalidates all existing client certificates)")
+	initCmd.Flags().StringSliceVar(&sans, "san", nil,
+		"extra SAN (IP or DNS) for the server certificate; repeatable. Required when control_addr is 0.0.0.0/:: so clients can verify the connection")
 	caCmd.AddCommand(initCmd)
 	return caCmd
 }
 
-func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool) error {
+func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool, sans []string) error {
 	caDir := filepath.Join(cfg.StateDir, "ca")
 	serverDir := filepath.Join(cfg.StateDir, "server")
 	caKeyPath := filepath.Join(caDir, "ca.key")
@@ -103,7 +107,9 @@ func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool) error {
 		return fmt.Errorf("write %s: %w", caCertPath, err)
 	}
 
-	// server certificate with SANs derived from control_addr
+	// server certificate SANs: control_addr host + explicit --san values.
+	// Wildcard listen addresses (0.0.0.0/::) are not usable as SANs and are
+	// skipped with a warning.
 	host, _, err := net.SplitHostPort(cfg.Listen.ControlAddr)
 	if err != nil {
 		return fmt.Errorf("parse control_addr: %w", err)
@@ -111,9 +117,23 @@ func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool) error {
 	var ips []net.IP
 	var dns []string
 	if ip := net.ParseIP(host); ip != nil {
-		ips = []net.IP{ip}
-	} else {
-		dns = []string{host}
+		if ip.IsUnspecified() {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: control_addr host %s is a wildcard; clients cannot verify it. Add SANs with --san (e.g. --san 203.0.113.5 --san tunnel.example.com).\n", host)
+		} else {
+			ips = append(ips, ip)
+		}
+	} else if host != "" {
+		dns = append(dns, host)
+	}
+	for _, san := range sans {
+		if ip := net.ParseIP(san); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			dns = append(dns, san)
+		}
+	}
+	if len(ips) == 0 && len(dns) == 0 {
+		return fmt.Errorf("no SAN for the server certificate (control_addr is a wildcard and no --san given)")
 	}
 	serverValidity := time.Duration(cfg.PKI.CAValidityYears) * 365 * 24 * time.Hour
 	serverCertPEM, serverKeyPEM, err := pki.SignServerCertificate(

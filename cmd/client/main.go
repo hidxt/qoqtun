@@ -32,7 +32,7 @@ func newRootCmd() *cobra.Command {
 		newRunCmd(),
 		newCheckConfigCmd(),
 		newCertCmd(),
-		newPlaceholderCmd("enroll", "Enroll this device with the server"),
+		newEnrollCmd(),
 		newPlaceholderCmd("tunnel", "Manage tunnels (list/start/stop)"),
 	)
 	return root
@@ -64,7 +64,7 @@ func newCertCmd() *cobra.Command {
 	initCmd.Flags().StringVar(&csrOut, "csr-out", "client.csr", "path to write the CSR (0644, non-sensitive)")
 	initCmd.Flags().StringVar(&secretsDir, "secrets-dir", "", "keystore fallback directory (default: <user-config>/qoqtun/secrets)")
 	initCmd.Flags().StringVar(&backendStr, "keystore-backend", "auto", "keystore backend: auto|keyring|file")
-	cmd.AddCommand(initCmd)
+	cmd.AddCommand(initCmd, newCertStatusCmd(), newCertRenewCmd())
 	return cmd
 }
 

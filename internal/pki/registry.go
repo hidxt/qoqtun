@@ -3,6 +3,7 @@ package pki
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 	"os"
 	"path/filepath"
 	"sync"
@@ -107,7 +108,7 @@ func (r *ClientRegistry) save() error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		return fmt.Errorf("create registry dir: %w", err)
 	}
-	if err := atomicWriteFile(r.path, append(data, '\n'), 0o600); err != nil {
+	if err := atomicfile.Write(r.path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("save client registry: %w", err)
 	}
 	return nil

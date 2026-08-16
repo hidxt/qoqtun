@@ -99,7 +99,7 @@ func TestCAInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := runRoot(t, "ca", "init", "--config", path)
+	out, err := runRoot(t, "ca", "init", "--config", path, "--san", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("ca init failed: %v\n%s", err, out)
 	}
@@ -112,12 +112,76 @@ func TestCAInit(t *testing.T) {
 		}
 	}
 	// idempotency: second init must fail without --force
-	_, err = runRoot(t, "ca", "init", "--config", path)
+	_, err = runRoot(t, "ca", "init", "--config", path, "--san", "127.0.0.1")
 	if err == nil {
 		t.Fatal("ca init must refuse to overwrite existing CA without --force")
 	}
 	// --force overwrites
-	if _, err := runRoot(t, "ca", "init", "--config", path, "--force"); err != nil {
+	if _, err := runRoot(t, "ca", "init", "--config", path, "--force", "--san", "127.0.0.1"); err != nil {
 		t.Fatalf("ca init --force failed: %v", err)
 	}
+}
+
+// stateConfig writes a minimal server.toml with a temp state_dir and runs
+// `ca init`, returning the config path.
+func stateConfig(t *testing.T) (configPath, stateDir string) {
+	t.Helper()
+	stateDir = filepath.Join(t.TempDir(), "state")
+	configPath = filepath.Join(t.TempDir(), "server.toml")
+	content := "state_dir = " + tomlStr(filepath.ToSlash(stateDir)) + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runRoot(t, "ca", "init", "--config", configPath, "--san", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	return configPath, stateDir
+}
+
+func TestCreateTokenCmd(t *testing.T) {
+	cfg, stateDir := stateConfig(t)
+	out, err := runRoot(t, "client", "create-token", "--config", cfg)
+	if err != nil {
+		t.Fatalf("create-token: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "qen_") {
+		t.Fatalf("token missing from output: %s", out)
+	}
+	// token persisted as hash only
+	data, err := os.ReadFile(filepath.Join(stateDir, "tokens.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "qen_") {
+		t.Fatal("tokens.json must never contain the plaintext token")
+	}
+}
+
+func TestRevokeTokenCmd(t *testing.T) {
+	cfg, stateDir := stateConfig(t)
+	_, err := runRoot(t, "client", "create-token", "--config", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// token_id is not printed by create-token; read from the store file
+	data, _ := os.ReadFile(filepath.Join(stateDir, "tokens.json"))
+	tokID := tokenIDFromJSON(t, string(data))
+	_, err = runRoot(t, "client", "revoke-token", tokID, "--config", cfg)
+	if err != nil {
+		t.Fatalf("revoke-token: %v", err)
+	}
+}
+
+func tokenIDFromJSON(t *testing.T, json string) string {
+	t.Helper()
+	idx := strings.Index(json, `"token_id": "`)
+	if idx < 0 {
+		t.Fatalf("token_id not found in %s", json)
+	}
+	rest := json[idx+len(`"token_id": "`):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		t.Fatal("unterminated token_id")
+	}
+	return rest[:end]
 }

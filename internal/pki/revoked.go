@@ -3,6 +3,7 @@ package pki
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 	"os"
 	"path/filepath"
 	"sync"
@@ -99,7 +100,7 @@ func (rl *RevocationList) save() error {
 	if err := os.MkdirAll(filepath.Dir(rl.path), 0o700); err != nil {
 		return fmt.Errorf("create revocation dir: %w", err)
 	}
-	if err := atomicWriteFile(rl.path, append(data, '\n'), 0o600); err != nil {
+	if err := atomicfile.Write(rl.path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("save revocation list: %w", err)
 	}
 	return nil

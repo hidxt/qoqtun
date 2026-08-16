@@ -31,14 +31,12 @@ func TestCheckConfigWithExample(t *testing.T) {
 }
 
 func TestPlaceholderSubcommands(t *testing.T) {
-	for _, sub := range []string{"enroll", "tunnel"} {
-		out, err := runRoot(t, sub)
-		if err != nil {
-			t.Fatalf("%s placeholder must not error: %v", sub, err)
-		}
-		if !strings.Contains(out, "not implemented yet") {
-			t.Fatalf("%s placeholder output missing marker: %s", sub, out)
-		}
+	out, err := runRoot(t, "tunnel")
+	if err != nil {
+		t.Fatalf("tunnel placeholder must not error: %v", err)
+	}
+	if !strings.Contains(out, "not implemented yet") {
+		t.Fatalf("tunnel placeholder output missing marker: %s", out)
 	}
 }
 
