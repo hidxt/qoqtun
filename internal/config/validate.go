@@ -174,6 +174,53 @@ func validLocalIP(s string) error {
 // ValidateServer checks every field of cfg against the schema rules.
 // Any error means the configuration is rejected (fail-closed).
 func ValidateServer(c *ServerConfig) error {
+	// backward compatibility: legacy files omit [policy]/[heartbeat]/
+	// [logging]; fill defaults before validating (Phase 14)
+	if len(c.Policy.AllowedPorts) == 0 {
+		c.Policy.AllowedPorts = []string{"20000-29999"}
+	}
+	if c.Policy.MaxTunnelsPerClient == 0 {
+		c.Policy.MaxTunnelsPerClient = 16
+	}
+	if c.Policy.MaxConnsPerClient == 0 {
+		c.Policy.MaxConnsPerClient = 256
+	}
+	if c.Policy.MaxConnsPerTunnel == 0 {
+		c.Policy.MaxConnsPerTunnel = 128
+	}
+	if len(c.Policy.AllowedTargets) == 0 {
+		c.Policy.AllowedTargets = []string{"10.0.0.0/8:*"}
+	}
+	if c.Policy.UDPMaxSessionsPerTunnel == 0 {
+		c.Policy.UDPMaxSessionsPerTunnel = 256
+	}
+	if c.Policy.UDPMaxPacket == 0 {
+		c.Policy.UDPMaxPacket = 1500
+	}
+	if c.Policy.UDPSessionIdleTimeout == "" {
+		c.Policy.UDPSessionIdleTimeout = "60s"
+	}
+	if c.Heartbeat.IntervalS == 0 {
+		c.Heartbeat.IntervalS = 15
+	}
+	if c.Heartbeat.TimeoutS == 0 {
+		c.Heartbeat.TimeoutS = 10
+	}
+	if c.Heartbeat.MissThreshold == 0 {
+		c.Heartbeat.MissThreshold = 2
+	}
+	if c.Logging.Level == "" {
+		c.Logging.Level = "info"
+	}
+	if c.PKI.CAValidityYears == 0 {
+		c.PKI.CAValidityYears = 10
+	}
+	if c.PKI.ClientCertValidityDays == 0 {
+		c.PKI.ClientCertValidityDays = 90
+	}
+	if c.PKI.TokenTTL == "" {
+		c.PKI.TokenTTL = "1h"
+	}
 	if c.StateDir == "" {
 		return fmt.Errorf("state_dir: required (no default)")
 	}
@@ -294,6 +341,29 @@ func ValidateServer(c *ServerConfig) error {
 
 // ValidateClient checks every field of cfg (05-config-schema.md §2).
 func ValidateClient(c *ClientConfig) error {
+	// backward compatibility: files written by earlier phases omit the
+	// optional sections; fill defaults before validating (Phase 14)
+	if c.Reconnect.InitialBackoff == "" {
+		c.Reconnect.InitialBackoff = "1s"
+	}
+	if c.Reconnect.MaxBackoff == "" {
+		c.Reconnect.MaxBackoff = "60s"
+	}
+	if c.Reconnect.Jitter == 0 {
+		c.Reconnect.Jitter = 0.2 // unset (legacy) => default; explicit negatives stay invalid
+	}
+	if !c.Heartbeat.Enabled {
+		// enabled=false means "use defaults" for legacy files
+		if c.Logging.Level == "" {
+			c.Heartbeat.Enabled = true
+		}
+	}
+	if c.Logging.Level == "" {
+		c.Logging.Level = "info"
+	}
+	if c.Logging.Format == "" {
+		c.Logging.Format = "text"
+	}
 	if c.ServerAddr == "" {
 		return fmt.Errorf("server_addr: required (no default)")
 	}

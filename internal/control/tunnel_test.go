@@ -48,6 +48,26 @@ func freePortInRange(t *testing.T) int {
 	return 0
 }
 
+// udpPortInRange returns a free port probed in the UDP space (UDP tunnels
+// bind UDP, and a TCP probe does not guarantee a UDP port is free — a
+// freshly closed UDP socket may still hold the port on Windows).
+func udpPortInRange(t *testing.T) int {
+	t.Helper()
+	start := 20000 + rand.Intn(8000)
+	for p := start; p < 29999; p++ {
+		// probe with the same wildcard bind the server uses (:port), so a
+		// busy 0.0.0.0:port is detected too
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: p})
+		if err == nil {
+			port := conn.LocalAddr().(*net.UDPAddr).Port
+			conn.Close()
+			return port
+		}
+	}
+	t.Fatal("no free udp port in allowed range")
+	return 0
+}
+
 // startEchoServer runs an echo service on 127.0.0.1.
 func startEchoServer(t *testing.T) (port int, stop func()) {
 	t.Helper()

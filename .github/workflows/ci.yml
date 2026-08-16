@@ -1,38 +1,80 @@
-name: CI
+name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: '23 2 * * *' # nightly full matrix
+
+env:
+  GO_VERSION: '1.26'
 
 jobs:
-  build-test:
-    name: build & test (${{ matrix.os }})
+  # PR / main: main platforms, full checks (security tests must stay here)
+  pr:
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
-          # 1.26 resolves GO-2026-5972 (encoding/asn1) in the standard
-          # library; the module itself declares go 1.22 as the minimum.
-          go-version: "1.26"
-
-      - name: Vet
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: vet
         run: go vet ./...
+      - name: test
+        run: go test ./... -count=1
+      - name: race (unix)
+        if: runner.os != 'Windows'
+        run: go test -race ./... -count=1
+      - name: cross-build
+        run: |
+          go build ./...
+          for os in windows linux darwin; do for arch in amd64 arm64; do
+            GOOS=$os GOARCH=$arch go build ./...
+          done; done
+      - name: secret scan
+        run: |
+          if grep -rniE 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|-----BEGIN [A-Z ]*PRIVATE|qen_[A-Za-z0-9]{20,}' --include='*.go' --include='*.toml' --include='*.md' --include='*.yml' . | grep -v '\.git/' | grep -v 'enrollment.md' | grep -v 'sample_test.go'; then
+            echo "secret scan failed"; exit 1
+          fi
+      - name: e2e (linux container)
+        if: runner.os == 'Linux'
+        run: bash scripts/e2e.sh
 
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test ./...
-
-      # -race needs a C toolchain (cgo); run it on ubuntu/macos where one is
-      # always present (Windows runners may lack gcc).
-      - name: Race
-        if: matrix.os != 'windows-latest'
-        run: go test -race ./...
+  # nightly: full matrix incl. desktop build on native platforms
+  nightly:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        arch: [amd64, arm64]
+        exclude:
+          - os: ubuntu-latest
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: test
+        run: go test ./... -count=1
+      - name: race (unix)
+        if: runner.os != 'Windows'
+        run: go test -race ./... -count=1
+      # desktop build: native platform only (wails needs webkit on linux)
+      - name: desktop build (linux, needs webkit deps)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          go build ./cmd/desktop/
+      - name: desktop build (windows/macos)
+        if: runner.os != 'Linux'
+        run: go build ./cmd/desktop/

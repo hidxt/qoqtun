@@ -11,6 +11,22 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// listenUDPWithRetry binds the UDP listener, tolerating a briefly held
+// port right after a close (Windows releases UDP ports asynchronously;
+// quick restarts/teardowns would otherwise race).
+func listenUDPWithRetry(addr *net.UDPAddr) (*net.UDPConn, error) {
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		conn, err := net.ListenUDP("udp", addr)
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		time.Sleep(150 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
 // udpSession maps one public-side peer to a session id.
 type udpSession struct {
 	id         []byte
@@ -46,7 +62,7 @@ func newUDPServerState(tunnelID string, port int, maxSessions, maxPacket int, id
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.ListenUDP("udp", addr)
+	conn, err := listenUDPWithRetry(addr)
 	if err != nil {
 		return nil, err
 	}

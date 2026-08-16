@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### Added（Phase 14 — 跨平台集成测试与发布工程就绪）
+- CI 矩阵（.github/workflows/ci.yml）：PR 主平台（windows/linux/macos amd64：vet+test+race+交叉编译+secret scan+e2e）；nightly 全矩阵 + desktop 构建（Linux 装 webkit 依赖，文档说明）。
+- e2e/权限脚本：scripts/e2e.sh（完整生命周期，本机 8/8 稳定）；scripts/privilege-check.sh（非 root 运行、setcap 低端口绑定、root 守卫提示）。
+- **兼容性修复（真实 bug）**：ValidateClient/ValidateServer 对旧配置文件（Phase 1-5 无可选段）填充默认值后校验——旧 client.toml/server.toml 现在可被新版本读取（TestLegacyClient/ServerConfig 回归）。
+- **flaky 清零**：UDP 端口探测改为 UDP 空间（TCP 探测与残留 UDP socket 冲突导致 Windows 端口复用失败）；UDP 并发测试加通道就绪等待 + goroutine 安全回包（t.Fatal 禁用）；control 全量连跑稳定。
+- docs/operations/install.md（三平台安装/权限/低端口/卸载/验证）。
+
 ### Added（Phase 13 — Desktop UI，Stitch 设计包驱动）
 - Stitch 资产盘点入库（docs/desktop/stitch-inventory.md：13 页面/主题 token/组件/缺口映射）；设计语言 Terra「Rooted Warmth」。
 - 前端本地化：Tailwind play CDN 本地化（离线）、Inter/JetBrains Mono woff2 打包、无 CDN/无新 npm 依赖、无遥测。

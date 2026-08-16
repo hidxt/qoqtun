@@ -64,6 +64,7 @@ func startUDPClient(t *testing.T, env *testEnv, port, localPort int) (*clientcor
 	client := fastClient(t, env, []clientcore.TunnelSpec{
 		{Name: "udp1", Type: "udp", RemotePort: port, LocalIP: "127.0.0.1", LocalPort: localPort, Enabled: true},
 	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- client.Run(ctx) }()
@@ -77,7 +78,7 @@ func TestUDPEchoEndToEnd(t *testing.T) {
 	echoPort, stopEcho := startUDPEchoServer(t)
 	defer stopEcho()
 
-	port := freePortInRange(t)
+	port := udpPortInRange(t)
 	_, cancel, errCh := startUDPClient(t, env, port, echoPort)
 	defer waitClientExit(cancel, errCh)
 
@@ -103,9 +104,13 @@ func TestUDPMultiPeerConcurrent(t *testing.T) {
 	echoPort, stopEcho := startUDPEchoServer(t)
 	defer stopEcho()
 
-	port := freePortInRange(t)
+	port := udpPortInRange(t)
 	_, cancel, errCh := startUDPClient(t, env, port, echoPort)
 	defer waitClientExit(cancel, errCh)
+
+	// wait for the UDP channel to be fully established before hammering
+	// with 20 peers (the channel is pre-opened asynchronously)
+	udpRoundTrip(t, port, []byte("warm"), 60)
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 20)
@@ -114,7 +119,11 @@ func TestUDPMultiPeerConcurrent(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			msg := []byte(fmt.Sprintf("peer-%d", i))
-			got := udpRoundTrip(t, port, msg, 25)
+			got, err := udpRoundTripErr(port, msg, 60)
+			if err != nil {
+				errs <- err
+				return
+			}
 			if string(got) != string(msg) {
 				errs <- fmt.Errorf("peer %d mismatch: %q", i, got)
 			}
@@ -127,6 +136,29 @@ func TestUDPMultiPeerConcurrent(t *testing.T) {
 	}
 }
 
+// udpRoundTripErr is udpRoundTrip without t.Fatal (safe for goroutines):
+// returns the echoed payload or an error.
+func udpRoundTripErr(port int, payload []byte, retries int) ([]byte, error) {
+	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	for i := 0; i < retries; i++ {
+		_ = conn.SetDeadline(time.Now().Add(400 * time.Millisecond))
+		if _, err := conn.Write(payload); err != nil {
+			return nil, err
+		}
+		buf := make([]byte, 65535)
+		n, err := conn.Read(buf)
+		if err == nil {
+			return buf[:n], nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("udp round trip timed out for %d-byte payload", len(payload))
+}
+
 // TestUDPControlDisconnectClearsSessions: dropping the control connection
 // removes the tunnel and all UDP sessions.
 func TestUDPControlDisconnectClearsSessions(t *testing.T) {
@@ -135,10 +167,10 @@ func TestUDPControlDisconnectClearsSessions(t *testing.T) {
 	echoPort, stopEcho := startUDPEchoServer(t)
 	defer stopEcho()
 
-	port := freePortInRange(t)
+	port := udpPortInRange(t)
 	client, cancel, errCh := startUDPClient(t, env, port, echoPort)
 	defer waitClientExit(cancel, errCh)
-	udpRoundTrip(t, port, []byte("warmup"), 25)
+	udpRoundTrip(t, port, []byte("warmup"), 60)
 
 	// drop the control connection; the tunnel (and its UDP listener) go away
 	sess, ok := env.srv.Sessions.Get(client.ClientID)

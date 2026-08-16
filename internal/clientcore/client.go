@@ -53,7 +53,7 @@ type Client struct {
 	missed       atomic.Int32
 	mu           sync.Mutex
 	pendingMu    sync.Mutex
-	pending      map[uint64]chan *protocol.Envelope
+	pending      map[uint64]*pendingReq
 	conn         *transport.Conn
 	closeOnce    sync.Once
 }
@@ -145,7 +145,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	defer conn.Close()
 	c.conn = conn
 	c.pendingMu.Lock()
-	c.pending = make(map[uint64]chan *protocol.Envelope)
+	c.pending = make(map[uint64]*pendingReq)
 	c.pendingMu.Unlock()
 	defer func() {
 		c.closeOnce.Do(func() {
@@ -285,7 +285,7 @@ func (c *Client) RegisterTunnel(ctx context.Context, t TunnelSpec) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	env, err := c.rpc(ctx, protocol.MsgRegisterTunnel, req)
+	env, err := c.rpcSpec(ctx, protocol.MsgRegisterTunnel, req, t)
 	if err != nil {
 		return err
 	}
@@ -299,10 +299,7 @@ func (c *Client) RegisterTunnel(ctx context.Context, t TunnelSpec) error {
 	if !rr.OK {
 		return fmt.Errorf("tunnel %q rejected: %s: %s", t.Name, errCode(rr.Error), errMsg(rr.Error))
 	}
-	c.tunnelClient.RegisterLocal(&tunnel.TunnelConfig{
-		ID: rr.TunnelID, Name: t.Name, Type: t.Type,
-		RemotePort: t.RemotePort, LocalIP: t.LocalIP, LocalPort: t.LocalPort,
-	})
+	// the local registry entry was added by the read loop in frame order
 	c.Log.Info("tunnel registered", "name", t.Name, "tunnel_id", rr.TunnelID, "port", rr.Effective.RemotePort)
 	return nil
 }
@@ -401,10 +398,24 @@ func (c *Client) readLoop() error {
 			c.handleOpenConnection(env)
 		case protocol.MsgRegisterTunnelResp:
 			// synchronous register/unregister replies are dispatched to the
-			// pending waiter (tunnel start/stop via IPC)
-			if ch := c.takePending(env.Seq); ch != nil {
+			// pending waiter (tunnel start/stop via IPC). For register
+			// replies the tunnel is registered HERE, in frame order: the
+			// server sends open_connection frames right after the register
+			// response, and by the time the read loop processes them the
+			// tunnel must already be known (else "unknown tunnel").
+			if pr := c.takePending(env.Seq); pr != nil {
+				if pr.spec.Name != "" {
+					var rr protocol.RegisterTunnelResp
+					if err := env.DecodePayload(&rr); err == nil && rr.OK && c.tunnelClient != nil {
+						c.tunnelClient.RegisterLocal(&tunnel.TunnelConfig{
+							ID: rr.TunnelID, Name: pr.spec.Name, Type: pr.spec.Type,
+							RemotePort: pr.spec.RemotePort, LocalIP: pr.spec.LocalIP,
+							LocalPort: pr.spec.LocalPort,
+						})
+					}
+				}
 				select {
-				case ch <- env:
+				case pr.ch <- env:
 				default:
 				}
 			}
@@ -432,22 +443,33 @@ func (c *Client) handleOpenConnection(env *protocol.Envelope) {
 	}()
 }
 
-func (c *Client) takePending(seq uint64) chan *protocol.Envelope {
+// pendingReq tracks a synchronous register/unregister call so the read
+// loop can apply the side effects in frame order (see dispatch below).
+type pendingReq struct {
+	ch   chan *protocol.Envelope
+	spec TunnelSpec // non-empty for register calls
+}
+
+func (c *Client) takePending(seq uint64) *pendingReq {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
-	ch := c.pending[seq]
+	pr := c.pending[seq]
 	delete(c.pending, seq)
-	return ch
+	return pr
 }
 
 // rpc sends a request frame and waits for the matching response (used by
 // tunnel start/stop from the local control endpoint; the read loop owns
 // the connection, so replies flow through the pending table).
 func (c *Client) rpc(ctx context.Context, msgType string, req any) (*protocol.Envelope, error) {
+	return c.rpcSpec(ctx, msgType, req, TunnelSpec{})
+}
+
+func (c *Client) rpcSpec(ctx context.Context, msgType string, req any, spec TunnelSpec) (*protocol.Envelope, error) {
 	seq := c.nextSeq()
 	ch := make(chan *protocol.Envelope, 1)
 	c.pendingMu.Lock()
-	c.pending[seq] = ch
+	c.pending[seq] = &pendingReq{ch: ch, spec: spec}
 	c.pendingMu.Unlock()
 	c.mu.Lock()
 	conn := c.conn
