@@ -3,16 +3,23 @@
 package main
 
 import (
+	"context"
+	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/hidxt/qoqtun/internal/config"
+	"github.com/hidxt/qoqtun/internal/control"
 	"github.com/hidxt/qoqtun/internal/logging"
 	"github.com/hidxt/qoqtun/internal/pki"
+	"github.com/hidxt/qoqtun/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -158,7 +165,7 @@ func newRunCmd() *cobra.Command {
 	var configPath string
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run the server (placeholder until Phase 4)",
+		Short: "Run the server control plane (mTLS + tunnel listeners)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadServerConfig(configPath)
 			if err != nil {
@@ -168,14 +175,73 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			logger.Info("server run: not implemented yet (Phase 4+)",
-				"state_dir", cfg.StateDir,
-				"control_addr", cfg.Listen.ControlAddr)
-			return nil
+			return runServer(cfg, logger)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to server.toml")
 	return cmd
+}
+
+// runServer loads the PKI materials and serves the control plane until
+// interrupted.
+func runServer(cfg *config.ServerConfig, logger *slog.Logger) error {
+	caCertPEM, err := os.ReadFile(filepath.Join(cfg.StateDir, "ca", "ca.crt"))
+	if err != nil {
+		return fmt.Errorf("load CA cert (run `ca init` first): %w", err)
+	}
+	caKeyPEM, err := os.ReadFile(filepath.Join(cfg.StateDir, "ca", "ca.key"))
+	if err != nil {
+		return fmt.Errorf("load CA key: %w", err)
+	}
+	caCert, err := pki.ParseCertificate(caCertPEM)
+	if err != nil {
+		return err
+	}
+	_, err = pki.ParsePrivateKey(caKeyPEM)
+	if err != nil {
+		return err
+	}
+	serverCertPEM, err := os.ReadFile(filepath.Join(cfg.StateDir, "server", "server.crt"))
+	if err != nil {
+		return fmt.Errorf("load server cert: %w", err)
+	}
+	serverKeyPEM, err := os.ReadFile(filepath.Join(cfg.StateDir, "server", "server.key"))
+	if err != nil {
+		return fmt.Errorf("load server key: %w", err)
+	}
+	revoked, err := pki.LoadRevocationList(filepath.Join(cfg.StateDir, "revoked.json"))
+	if err != nil {
+		return err
+	}
+
+	raw, err := net.Listen("tcp", cfg.Listen.ControlAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", cfg.Listen.ControlAddr, err)
+	}
+	ln, err := transport.Listen(raw, transport.Options{
+		CAs:              []*x509.Certificate{caCert},
+		Cert:             serverCertPEM,
+		Key:              serverKeyPEM,
+		IsRevoked:        revoked.IsRevoked,
+		HandshakeTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	srv := &control.Server{
+		CAs:              []*x509.Certificate{caCert},
+		Cert:             serverCertPEM,
+		Key:              serverKeyPEM,
+		IsRevoked:        revoked.IsRevoked,
+		Cfg:              cfg,
+		Log:              logger,
+		MaxHalfOpen:      8,
+		HandshakeTimeout: 10 * time.Second,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	logger.Info("server control plane starting", "addr", cfg.Listen.ControlAddr)
+	return srv.Serve(ctx, ln)
 }
 
 func newCheckConfigCmd() *cobra.Command {

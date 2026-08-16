@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added（Phase 5 — TCP Tunnel MVP）
+
+- `internal/tunnel`：Server Manager（注册/端口仲裁/Public Listener/conn_id=CSPRNG 128-bit pending 表 10s 超时清理/ClaimData 认领）；Client（回源 ACL allowed_targets 校验、解析-校验-dial 同 IP 防 DNS rebinding、mTLS 数据连接 + open_data 首帧）；splice 双向 io.CopyBuffer 32KiB + half-close 状态机（2 goroutine + owner，关闭集中、空闲 5min）。
+- 接线：control 首帧分发（client_hello=控制 / open_data=数据）、register/unregister 处理（端口范围/占用/限额基础检查）；clientcore 启动时按 client.toml 注册隧道、open_connection 建数据连接。
+- 数据连接复用 control_addr 同端口（mTLS RequireAndVerifyClientCert，CN==控制连接身份）。
+- 测试（全本机回环）：echo 端到端、64MiB 大流量字节校验、并发 100 连接、half-close、origin 不可达、回源 ACL 拒绝、goroutine 回落断言。
+- 平台经验修复：握手 deadline 在握手完成后必须清除（否则 readLoop 定时超时）；Windows 临时端口 49152+ 不在 policy 范围，测试需在 allowed_ports 内探测端口。
+
 ### Added（Phase 4 — Control Protocol、mTLS 传输、Session）
 
 - `internal/protocol`：4B 长度前缀 + JSON 信封（nonce 随机、ts、≤64KiB 超限即断）；§2 全部 13 种消息结构体；逐字段校验器（端口/名称/枚举/地址/限额）；错误码表；版本协商（不符→ERR_VERSION_UNSUPPORTED）；帧编解码可独立 Fuzz。

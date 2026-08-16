@@ -3,10 +3,16 @@
 package main
 
 import (
+	"context"
+	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
+	"github.com/hidxt/qoqtun/internal/clientcore"
 	"github.com/hidxt/qoqtun/internal/config"
 	"github.com/hidxt/qoqtun/internal/logging"
 	"github.com/hidxt/qoqtun/internal/pki"
@@ -129,10 +135,10 @@ func defaultSecretsDir() string {
 }
 
 func newRunCmd() *cobra.Command {
-	var configPath string
+	var configPath, statePath, caPath, secretsDir, backendStr string
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run the client (placeholder until Phase 5)",
+		Short: "Run the client (control session + tunnel forwarding)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := loadClientConfig(configPath)
 			if err != nil {
@@ -142,14 +148,100 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			logger.Info("client run: not implemented yet (Phase 5+)",
-				"server_addr", cfg.ServerAddr,
-				"tunnels", len(cfg.Tunnels))
-			return nil
+			if statePath == "" {
+				statePath = defaultStatePath()
+			}
+			if caPath == "" {
+				caPath = "ca.crt"
+			}
+			backend, err := keystore.ParseBackendPref(backendStr)
+			if err != nil {
+				return err
+			}
+			return runClient(cfg, logger, statePath, caPath, secretsDir, backend)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to client.toml")
+	cmd.Flags().StringVar(&statePath, "state", "", "path to the identity state file")
+	cmd.Flags().StringVar(&caPath, "ca", "", "path to the server CA certificate")
+	cmd.Flags().StringVar(&secretsDir, "secrets-dir", "", "keystore fallback directory")
+	cmd.Flags().StringVar(&backendStr, "keystore-backend", "auto", "keystore backend: auto|keyring|file")
 	return cmd
+}
+
+// runClient loads the identity, builds the control session and runs it
+// until interrupted or disconnected.
+func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath, secretsDir string, backend keystore.BackendPref) error {
+	st, err := loadClientState(statePath)
+	if err != nil {
+		return fmt.Errorf("load identity (run `client enroll` first): %w", err)
+	}
+	caCertPEM, err := os.ReadFile(caPath)
+	if err != nil {
+		return fmt.Errorf("read CA cert %s: %w", caPath, err)
+	}
+	caCert, err := pki.ParseCertificate(caCertPEM)
+	if err != nil {
+		return err
+	}
+	certPEM, err := os.ReadFile(st.CertPath)
+	if err != nil {
+		return fmt.Errorf("read client cert: %w", err)
+	}
+	keyPEM, err := loadClientKey(secretsDir, backend)
+	if err != nil {
+		return err
+	}
+	if _, err := pki.ParsePrivateKey(keyPEM); err != nil {
+		return err
+	}
+	// renew-on-expiry is Phase 6; fail fast here
+	cert, err := pki.ParseCertificate(certPEM)
+	if err != nil {
+		return err
+	}
+	if pki.IsExpired(cert) {
+		return fmt.Errorf("client certificate expired (re-enroll with `client enroll`)")
+	}
+
+	// the control plane address comes from the config; the state file only
+	// records the address used at enrollment (which may be the enroll port)
+	serverAddr := cfg.ServerAddr
+	if serverAddr == "" {
+		serverAddr = st.ServerAddr
+	}
+	client := &clientcore.Client{
+		ServerAddr: serverAddr,
+		CAs:        []*x509.Certificate{caCert},
+		Cert:       certPEM,
+		Key:        keyPEM,
+		ClientID:   st.ClientID,
+		Name:       hostname(),
+		Log:        logger,
+		Tunnels:    tunnelsToSpecs(cfg.Tunnels),
+	}
+	logger.Info("client starting", "server", serverAddr, "client_id", st.ClientID,
+		"tunnels", len(cfg.Tunnels))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return client.Run(ctx)
+}
+
+// tunnelsToSpecs converts config tunnels to clientcore specs.
+func tunnelsToSpecs(tunnels []config.TunnelConfig) []clientcore.TunnelSpec {
+	out := make([]clientcore.TunnelSpec, 0, len(tunnels))
+	for _, t := range tunnels {
+		out = append(out, clientcore.TunnelSpec{
+			Name:       t.Name,
+			Type:       t.Type,
+			RemotePort: t.RemotePort,
+			LocalIP:    t.LocalIP,
+			LocalPort:  t.LocalPort,
+			HTTPHost:   t.HTTPHost,
+			Enabled:    t.Enabled,
+		})
+	}
+	return out
 }
 
 func newCheckConfigCmd() *cobra.Command {

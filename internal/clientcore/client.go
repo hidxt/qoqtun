@@ -16,6 +16,7 @@ import (
 
 	"github.com/hidxt/qoqtun/internal/protocol"
 	"github.com/hidxt/qoqtun/internal/transport"
+	"github.com/hidxt/qoqtun/internal/tunnel"
 )
 
 // Client drives one control session.
@@ -30,16 +31,42 @@ type Client struct {
 	Note     string
 	Log      *slog.Logger
 
+	// Tunnels to register after handshake (from client.toml).
+	Tunnels []TunnelSpec
+
 	// Heartbeat is the negotiated parameters (filled after handshake).
 	Heartbeat protocol.Heartbeat
 	// Policy is the server-assigned policy (filled after handshake).
 	Policy protocol.Policy
 
-	seq       uint64
-	missed    atomic.Int32
-	mu        sync.Mutex
-	conn      *transport.Conn
-	closeOnce sync.Once
+	tunnelClient *tunnel.Client
+	seq          uint64
+	missed       atomic.Int32
+	mu           sync.Mutex
+	conn         *transport.Conn
+	closeOnce    sync.Once
+}
+
+// TunnelSpec is one tunnel to register (mirrors config.TunnelConfig).
+type TunnelSpec struct {
+	Name       string
+	Type       string
+	RemotePort int
+	LocalIP    string
+	LocalPort  int
+	HTTPHost   string
+	Enabled    bool
+}
+
+// setupTunnels builds the client-side tunnel manager after the policy is
+// received (allowed_targets is required for the origin ACL).
+func (c *Client) setupTunnels() error {
+	tc, err := tunnel.NewClient(c.ServerAddr, c.CAs, c.Cert, c.Key, c.Policy.AllowedTargets, c.Log)
+	if err != nil {
+		return err
+	}
+	c.tunnelClient = tc
+	return nil
 }
 
 // Run connects, handshakes and maintains the control session until ctx is
@@ -99,6 +126,8 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.Policy = sh.Policy
 	c.Heartbeat = sh.Heartbeat
+	// handshake done: clear the deadline; heartbeat miss counting takes over
+	_ = conn.SetDeadline(time.Time{})
 	if c.Heartbeat.IntervalS <= 0 {
 		c.Heartbeat.IntervalS = 15
 	}
@@ -107,6 +136,13 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.Log.Info("control session established", "server", c.ServerAddr,
 		"session", sh.SessionID, "max_tunnels", sh.Policy.MaxTunnels)
+
+	if err := c.setupTunnels(); err != nil {
+		return fmt.Errorf("clientcore: tunnel setup: %w", err)
+	}
+	if err := c.registerConfiguredTunnels(ctx); err != nil {
+		return fmt.Errorf("clientcore: register tunnels: %w", err)
+	}
 
 	// heartbeat loop (client pings at interval)
 	ticker := time.NewTicker(time.Duration(c.Heartbeat.IntervalS) * time.Second)
@@ -135,6 +171,60 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
+// registerConfiguredTunnels sends register_tunnel for every enabled tunnel
+// in the config and records the server-assigned ids.
+func (c *Client) registerConfiguredTunnels(ctx context.Context) error {
+	if c.tunnelClient == nil {
+		return fmt.Errorf("clientcore: tunnel client not initialized")
+	}
+	for _, t := range c.Tunnels {
+		if !t.Enabled {
+			continue
+		}
+		req := &protocol.RegisterTunnel{
+			Name:       t.Name,
+			Type:       t.Type,
+			RemotePort: t.RemotePort,
+			Local:      protocol.LocalTarget{IP: t.LocalIP, Port: t.LocalPort},
+		}
+		if t.Type == "http" && t.HTTPHost != "" {
+			req.HTTP = &protocol.HTTPConfig{Host: t.HTTPHost}
+		}
+		seq := c.nextSeq()
+		if err := c.conn.WriteFrame(protocol.MsgRegisterTunnel, seq, req); err != nil {
+			return err
+		}
+		resp, err := protocol.ReadFrame(c.conn)
+		if err != nil {
+			return err
+		}
+		if resp.Type != protocol.MsgRegisterTunnelResp {
+			return fmt.Errorf("clientcore: unexpected %s during tunnel registration", resp.Type)
+		}
+		var rr protocol.RegisterTunnelResp
+		if err := resp.DecodePayload(&rr); err != nil {
+			return err
+		}
+		if !rr.OK {
+			c.Log.Warn("tunnel registration rejected", "name", t.Name, "code", errCode(rr.Error))
+			continue
+		}
+		c.tunnelClient.RegisterLocal(&tunnel.TunnelConfig{
+			ID: rr.TunnelID, Name: t.Name, Type: t.Type,
+			RemotePort: t.RemotePort, LocalIP: t.LocalIP, LocalPort: t.LocalPort,
+		})
+		c.Log.Info("tunnel registered", "name", t.Name, "tunnel_id", rr.TunnelID, "port", rr.Effective.RemotePort)
+	}
+	return nil
+}
+
+func errCode(e *protocol.Error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // readLoop consumes server frames until the connection dies.
 func (c *Client) readLoop() error {
 	for {
@@ -159,6 +249,8 @@ func (c *Client) readLoop() error {
 				c.Policy = pu.Policy
 				c.Log.Info("policy updated", "max_tunnels", pu.Policy.MaxTunnels)
 			}
+		case protocol.MsgOpenConnection:
+			c.handleOpenConnection(env)
 		case protocol.MsgShutdown:
 			return fmt.Errorf("server shutdown")
 		default:
@@ -166,6 +258,21 @@ func (c *Client) readLoop() error {
 			c.Log.Warn("clientcore: ignoring message", "type", env.Type)
 		}
 	}
+}
+
+// handleOpenConnection establishes a data connection for a public-side
+// connection; runs in its own goroutine (splice is long-lived).
+func (c *Client) handleOpenConnection(env *protocol.Envelope) {
+	var oc protocol.OpenConnection
+	if err := env.DecodePayload(&oc); err != nil {
+		c.Log.Warn("clientcore: bad open_connection", "error", err)
+		return
+	}
+	go func() {
+		if err := c.tunnelClient.HandleOpenConnection(context.Background(), &oc); err != nil {
+			c.Log.Warn("clientcore: data connection failed", "conn_id", oc.ConnID[:min(8, len(oc.ConnID))], "error", err)
+		}
+	}()
 }
 
 func (c *Client) nextSeq() uint64 {

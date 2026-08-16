@@ -78,7 +78,8 @@ func TestCheckConfigWithoutConfigUsesDefaults(t *testing.T) {
 	}
 }
 
-func TestRunPlaceholder(t *testing.T) {
+// TestRunRequiresCA: `server run` needs initialized PKI materials.
+func TestRunRequiresCA(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.toml")
 	content := "state_dir = " + tomlStr(filepath.ToSlash(dir)) + "\n"
@@ -86,8 +87,8 @@ func TestRunPlaceholder(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := runRoot(t, "run", "--config", path)
-	if err != nil {
-		t.Fatalf("run placeholder should succeed: %v", err)
+	if err == nil {
+		t.Fatal("run without CA must fail")
 	}
 }
 

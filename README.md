@@ -94,6 +94,15 @@ go run ./cmd/server cert list                                 # 已签发证书
 go run ./cmd/server cert revoke <serial> --reason "device lost"  # 吊销（下一握手生效）
 ```
 
+TCP 穿透（Phase 5 起可用；client.toml 配置 `[[tunnels]]` 后启动 client，公网端口即 `remote_port`）：
+
+```sh
+go run ./cmd/server run --config server.toml     # 启动控制面（含公网 Tunnel 监听）
+go run ./cmd/client run --config client.toml     # 注册隧道、建立数据连接并转发
+# 示例：client.toml 中 tunnels.ssh{type=tcp, remote_port=22000, local=127.0.0.1:22}
+# 公网访问: ssh -p 22000 user@server
+```
+
 ## 文档
 
 - 开发规划与设计文档（唯一事实来源）：[docs/plan/README.md](docs/plan/README.md)

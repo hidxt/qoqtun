@@ -54,6 +54,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	cfg.Heartbeat.IntervalS = 1
 	cfg.Heartbeat.TimeoutS = 1
 	cfg.Heartbeat.MissThreshold = 2
+	cfg.Policy.AllowedTargets = []string{"127.0.0.0/8:*"} // tests dial loopback origins
 
 	reg := session.NewRegistry()
 	srv := &control.Server{

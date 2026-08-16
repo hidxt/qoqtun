@@ -93,15 +93,16 @@ func TestCertInitStoresKeyInKeystore(t *testing.T) {
 	}
 }
 
-func TestRunPlaceholder(t *testing.T) {
+// TestRunRequiresIdentity: `client run` needs an enrolled identity.
+func TestRunRequiresIdentity(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/client.toml"
 	content := "server_addr = \"tunnel.example.com:7000\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runRoot(t, "run", "--config", path)
-	if err != nil {
-		t.Fatalf("run placeholder should succeed: %v", err)
+	_, err := runRoot(t, "run", "--config", path, "--state", filepath.Join(dir, "state.json"))
+	if err == nil {
+		t.Fatal("run without identity must fail")
 	}
 }
