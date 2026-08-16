@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+### Added（Phase 7 — UDP Tunnel）
+
+- `internal/tunnel` UDP 实现：UDP Public Listener（按隧道注册）；session 映射（(tunnel,对端addr)→16B CSPRNG id）；LRU 上限（默认 256/tunnel，满淘汰最久未活跃+审计）；每公网 IP pps 限速（5/s burst 10，Server 强制）；空闲 60s 清扫；通道帧 `[4B len][session_id 16B][payload]`（max_packet 1500/硬上限 65507，超限丢弃计数）。
+- UDP 数据通道：每 client 每 tunnel 一条 mTLS-over-TCP 长连接（注册后预建，断开自动重建）；回包路径（帧→还原原始对端 addr）；Client 侧 session_id→本地 UDP 套接字池（回源前 allowed_targets ACL）。
+- control 接线：注册 resp 后预建通道（帧顺序修复）；数据连接按 transport 分流（udp 通道 / tcp splice）；通道断开清空+回调重建。
+- 测试：帧编解码/超限；session 映射/LRU/空闲回收/限速（包内）；**UDP echo 端到端**（小包/1200B 大包/20 对端并发）；控制面断开 session 全清；通道重建（真实 TCP 断开触发回调）。
+- 修复：UDP 预建通道 nil 公网连接崩溃（pending 判空）；数据连接生命周期归 splice/通道所有（handleConn 不再 defer 关闭数据连接）；注册期间帧顺序（resp 先于 open_connection）；通道 read loop 退出用 break 而非 return（否则清理/重建永不执行）。
+- 文档：[docs/udp-semantics.md](docs/udp-semantics.md)（伪连接/超时/上限/丢包语义）。
+
 ### Added（Phase 6 — 重连、心跳完善、Graceful Shutdown、Connection Manager）
 
 - `internal/clientcore` Connection Manager：状态机（Disconnected/Connecting/Online/Draining/Stopped）；错误分类器（TLS/协议错误=永久、网络=临时）；重连循环（1s×2 上限 60s ±20% jitter，[reconnect] 可配，日志降频采样）；重连成功自动重注册全部隧道；被踢会话收到 fatal error 停止重连（防乒乓）；ctx cancel 时向 Server 发 shutdown 协商。

@@ -37,6 +37,11 @@ type Server struct {
 	// HandshakeTimeout bounds the whole hello exchange.
 	HandshakeTimeout time.Duration
 
+	// UDP limits applied to per-client tunnel managers (tests shrink).
+	UDPIdleTimeout time.Duration
+	UDPMaxSessions int
+	UDPMaxPacket   int
+
 	Sessions *session.Registry
 
 	// per-client tunnel managers (data-plane pairing).
@@ -146,14 +151,13 @@ func (s *Server) Serve(ctx context.Context, ln *transport.Listener) error {
 //   - client_hello: control connection lifecycle (Phase 4);
 //   - open_data:    a data connection claiming a conn_id (Phase 5).
 func (s *Server) handleConn(ctx context.Context, conn *transport.Conn) {
-	defer conn.Close()
-
 	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
 	if err != nil {
 		host = conn.RemoteAddr().String()
 	}
 	if !s.halfOpen.tryAcquire(host, s.MaxHalfOpen) {
 		s.Log.Warn("control: half-open limit exceeded", "ip", host)
+		_ = conn.Close()
 		return
 	}
 	defer s.halfOpen.release(host)
@@ -161,10 +165,12 @@ func (s *Server) handleConn(ctx context.Context, conn *transport.Conn) {
 	peerID := conn.PeerID()
 	if peerID == "" {
 		s.Log.Warn("control: connection without identity", "ip", host)
+		_ = conn.Close()
 		return
 	}
 	if s.IsRevoked != nil && s.IsRevoked(peerID) {
 		_ = conn.WriteFrame(protocol.MsgError, 0, protocol.NewError(protocol.ErrCodeAuthFailed, "client revoked", true))
+		_ = conn.Close()
 		return
 	}
 
@@ -172,15 +178,20 @@ func (s *Server) handleConn(ctx context.Context, conn *transport.Conn) {
 	env, err := protocol.ReadFrame(conn)
 	if err != nil {
 		s.Log.Warn("control: first frame read failed", "ip", host, "error", err)
+		_ = conn.Close()
 		return
 	}
 	switch env.Type {
 	case protocol.MsgOpenData:
+		// data connections own their lifecycle (splice closeBoth / UDP
+		// channel ownership); handleConn must not close them here.
 		s.handleDataConn(ctx, conn, peerID, env)
 	case protocol.MsgClientHello:
+		defer conn.Close() // control connection owned by this goroutine
 		s.handleControlConn(ctx, conn, host, peerID, env)
 	default:
 		_ = conn.WriteFrame(protocol.MsgError, 0, protocol.ProtocolError("expected client_hello or open_data"))
+		_ = conn.Close()
 	}
 }
 
@@ -200,10 +211,20 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 		_ = conn.Close()
 		return
 	}
-	publicConn, _, err := m.ClaimData(od.ConnID)
+	publicConn, t, err := m.ClaimData(od.ConnID)
 	if err != nil {
 		s.Log.Warn("control: data claim failed", "client_id", peerID, "error", err)
 		_ = conn.Close()
+		return
+	}
+	// UDP tunnels use the connection as a persistent channel, not a splice.
+	if t.Type == "udp" {
+		if publicConn != nil {
+			_ = publicConn.Close() // not used for UDP (session table only)
+		}
+		_ = conn.SetDeadline(time.Time{})
+		m := s.managerFor(peerID)
+		m.SetUDPChannel(ctx, t, conn)
 		return
 	}
 	s.dataConns.add(od.ConnID)
@@ -401,6 +422,17 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 		resp.Effective = &protocol.Effective{RemotePort: t.RemotePort}
 	}
 	_ = conn.WriteFrame(protocol.MsgRegisterTunnelResp, env.Seq, resp)
+	// UDP tunnels need a persistent data channel: pre-open it AFTER the
+	// register response (the client's registration is synchronous; an early
+	// open_connection would be misread as the response).
+	if resp.OK && req.Type == "udp" {
+		connID, oerr := m.OpenConnection(t, nil, 10*time.Second)
+		if oerr == nil {
+			_ = conn.WriteFrame(protocol.MsgOpenConnection, 0, &protocol.OpenConnection{
+				ConnID: connID, TunnelID: t.ID, Transport: "udp", DeadlineMS: 10000,
+			})
+		}
+	}
 }
 
 func (s *Server) handleUnregisterTunnel(conn *transport.Conn, m *tunnel.Manager, env *protocol.Envelope) {
@@ -422,6 +454,23 @@ func (s *Server) managerFor(clientID string) *tunnel.Manager {
 	m, ok := s.managers[clientID]
 	if !ok {
 		m = tunnel.NewManager(s.Log)
+		m.UDPIdleTimeout = s.UDPIdleTimeout
+		m.UDPMaxSessions = s.UDPMaxSessions
+		m.UDPMaxPacket = s.UDPMaxPacket
+		m.OnUDPChannelClosed = func(t *tunnel.Tunnel) {
+			// pre-open a replacement UDP channel (Phase 6 reconnect path)
+			sess, ok := s.Sessions.Get(clientID)
+			if !ok || sess.Conn == nil {
+				return
+			}
+			connID, err := m.OpenConnection(t, nil, 10*time.Second)
+			if err != nil {
+				return
+			}
+			_ = sess.Conn.WriteFrame(protocol.MsgOpenConnection, 0, &protocol.OpenConnection{
+				ConnID: connID, TunnelID: t.ID, Transport: "udp", DeadlineMS: 10000,
+			})
+		}
 		s.managers[clientID] = m
 	}
 	return m

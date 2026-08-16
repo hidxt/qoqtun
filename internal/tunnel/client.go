@@ -95,6 +95,9 @@ func (c *Client) Count() int {
 // validate the tunnel, ACL-check the origin, dial it (10s), open the mTLS
 // data connection and send the open_data first frame; then splice.
 func (c *Client) HandleOpenConnection(ctx context.Context, oc *protocol.OpenConnection) error {
+	if oc.Transport == "udp" {
+		return c.HandleUDPOpenConnection(ctx, oc)
+	}
 	tc, ok := c.Get(oc.TunnelID)
 	if !ok {
 		return fmt.Errorf("unknown tunnel %s", oc.TunnelID)
