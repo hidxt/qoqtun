@@ -88,6 +88,7 @@ qoqtun/
 │   │   └── keystore/      # 私钥安全存储（keyring + 0600 文件降级）
 │   ├── pki/               # CA、CSR、签发、解析、校验、序列号、吊销列表（纯函数为主）
 │   ├── auth/              # Enrollment Token 生成/哈希存储/一次性核销、mTLS 身份提取
+│   ├── enroll/            # Enrollment/Renew TLS 端点（帧编解码、每 IP 限速、签发编排）
 │   ├── protocol/          # qoqtun Protocol v1：消息类型、编解码、校验、错误码
 │   ├── transport/         # TLS 1.3 mTLS 拨号/监听、连接包装（超时、限读）
 │   ├── control/           # Server 端控制面：握手、策略下发、Tunnel 注册仲裁
@@ -111,6 +112,7 @@ platform, logging, protocol, metrics   ← 叶子层（互不依赖）
 config      → logging
 pki         → platform/keystore, logging
 auth        → pki, crypto/rand
+enroll      → auth, pki, logging（服务端 TLS 监听 + 客户端拨号）
 transport   → protocol, pki, logging
 security    → config
 session     → protocol, metrics

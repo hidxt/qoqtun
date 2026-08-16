@@ -79,11 +79,20 @@ go run ./cmd/client check-config --config examples/client.example.toml   # 同�
 初始化身份（私钥永不落明文文件、永不离开设备）：
 
 ```sh
-go run ./cmd/server ca init --config server.toml        # 生成 Root CA + 服务器证书（幂等，--force 覆盖）
+go run ./cmd/server ca init --config server.toml --san 203.0.113.5   # 生成 Root CA + 服务器证书（幂等，--force 覆盖）
 go run ./cmd/client cert init --csr-out client.csr      # 生成客户端私钥(入系统安全存储)+client_id+CSR
 ```
 
-操作手册见 [docs/operations/pki.md](docs/operations/pki.md)。
+在线签发（一次性 Token + TLS 1.3 Enrollment，操作手册见 [docs/operations/enrollment.md](docs/operations/enrollment.md) 与 [docs/operations/pki.md](docs/operations/pki.md)）：
+
+```sh
+go run ./cmd/server client create-token --config server.toml   # 一次性 Token（仅打印一次，服务端只存哈希）
+go run ./cmd/server enroll serve --config server.toml          # 启动 enroll/renew 监听
+go run ./cmd/client enroll --server 203.0.113.5:7001 --csr client.csr   # token 走 stdin 输入
+go run ./cmd/client cert status                               # 身份/到期/CA 指纹
+go run ./cmd/server cert list                                 # 已签发证书
+go run ./cmd/server cert revoke <serial> --reason "device lost"  # 吊销（下一握手生效）
+```
 
 ## 文档
 

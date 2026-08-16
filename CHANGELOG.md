@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added（Phase 3 — Enrollment、Token、签发与吊销）
+
+- `internal/auth`：Enrollment Token（32B crypto/rand → `qen_`+base62 展示、8B token_id）；tokens.json（只存 SHA-256 哈希、0600 原子写、惰性过期清理）；`Consume` 写锁内原子核销（防双花）；`Revoke`；跨进程文件变更重载（独立 `enroll serve` 感知新 token）。
+- `internal/enroll`：长度前缀+JSON 帧（4B 头 + 64KiB 上限）；EnrollServer（TLS 1.3，enroll 免客户端证书 / renew 强制 mTLS，吊销握手回调即时生效）；每 IP 限速 5/min + 失败指数封禁；EnrollClient（服务器证书指纹 TOFU/钉扎为信任锚、回验链+CN+公钥）；错误码映射（ERR_TOKEN_INVALID/EXPIRED/USED、ERR_NAME_CONFLICT、ERR_RATE_LIMITED 等）。
+- CLI：`server client create-token/list/revoke-token`、`server cert list/revoke`、`server enroll serve`、`client enroll`（token 优先 stdin）、`client cert status`、`client cert renew`（mTLS）。
+- `server ca init` 新增 `--san`（control_addr 为通配地址时必填，剔除 0.0.0.0/:: 并告警）。
+- 测试：token 一次性/过期/吊销/并发单赢/惰性清理/文件重载；enroll 坏 CSR/CN 冲突/限速；**enroll→mTLS renew→revoke→拒绝全链路（真实 TLS）**；续期新序列号。
+- 文档：[docs/operations/enrollment.md](docs/operations/enrollment.md)；01-architecture.md 目录树与依赖补 `internal/enroll`。
+- 依赖：新增 `golang.org/x/time`（限速，白名单内）。
+
 ### Added（Phase 2 — PKI 与跨平台私钥安全存储）
 
 - `internal/pki`（纯标准库）：Ed25519 自签 Root CA（128-bit 随机序列号、CertSign|CRLSign）；PKCS#10 CSR（CN=`cl_`+base32 小写 client_id、OU=name）；客户端证书签发（CSR POP 校验、仅 Ed25519、CN 格式、随机序列号、ClientAuth EKU、NotBefore-5min、NotAfter 截断到 CA 期）；服务器证书（ServerAuth + SAN IP/DNS）；解析/校验/序列化/指纹（SHA-256 冒号格式）/到期判断；吊销列表与客户端登记（原子写 + 线程安全）。
