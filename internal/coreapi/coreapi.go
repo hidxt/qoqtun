@@ -18,6 +18,7 @@ import (
 
 	"github.com/hidxt/qoqtun/internal/clientcore"
 	"github.com/hidxt/qoqtun/internal/config"
+	"github.com/hidxt/qoqtun/internal/enroll"
 	"github.com/hidxt/qoqtun/internal/metrics"
 	"github.com/hidxt/qoqtun/internal/pki"
 	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
@@ -365,6 +366,87 @@ func (a *API) GetIdentity() IdentityInfo {
 		}
 	}
 	return info
+}
+
+// EnrollOptions mirrors the CLI enroll inputs (token travels in memory
+// only; it is never persisted or logged).
+type EnrollOptions struct {
+	Token      string `json:"token"`
+	ServerAddr string `json:"server_addr"`
+	Name       string `json:"name"`
+}
+
+// Enroll provisions the device identity: generates the key (into the
+// keystore), sends the CSR with the one-time token, persists the issued
+// certificate and the state file.
+func (a *API) Enroll(o EnrollOptions) (IdentityInfo, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if o.Token == "" {
+		return IdentityInfo{}, fmt.Errorf("coreapi: token required")
+	}
+	if o.ServerAddr == "" {
+		return IdentityInfo{}, fmt.Errorf("coreapi: server_addr required")
+	}
+	dir := filepath.Dir(a.statePath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return IdentityInfo{}, err
+	}
+	store, _, err := keystore.OpenWithPref(keystore.KeyringConfig{ServiceName: "qoqtun"}, a.secretsDir, a.backend, nil)
+	if err != nil {
+		return IdentityInfo{}, fmt.Errorf("coreapi: keystore: %w", err)
+	}
+	key, err := pki.GenerateKey()
+	if err != nil {
+		return IdentityInfo{}, err
+	}
+	id, err := pki.ClientID()
+	if err != nil {
+		return IdentityInfo{}, err
+	}
+	csr, err := pki.CreateCSR(key, id, o.Name)
+	if err != nil {
+		return IdentityInfo{}, err
+	}
+	client := &enroll.Client{ServerAddr: o.ServerAddr}
+	res, err := client.Enroll(context.Background(), enroll.EnrollOptions{
+		Token: o.Token,
+		CSR:   csr,
+		Meta:  enroll.Meta{Name: o.Name},
+	})
+	if err != nil {
+		return IdentityInfo{}, fmt.Errorf("coreapi: enroll: %w", err)
+	}
+	keyPEM, err := pki.MarshalPrivateKey(key)
+	if err != nil {
+		return IdentityInfo{}, err
+	}
+	if err := store.Set("client-key", keyPEM); err != nil {
+		return IdentityInfo{}, err
+	}
+	certPath := filepath.Join(dir, "client.crt")
+	caPath := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(certPath, res.ClientCertPEM, 0o600); err != nil {
+		return IdentityInfo{}, err
+	}
+	if err := os.WriteFile(caPath, res.CACertPEM, 0o600); err != nil {
+		return IdentityInfo{}, err
+	}
+	st := map[string]string{
+		"client_id":      res.ClientID,
+		"server_addr":    o.ServerAddr,
+		"ca_fingerprint": res.CAFingerprint,
+		"cert_path":      certPath,
+		"expires_at":     res.ExpiresAt.Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return IdentityInfo{}, err
+	}
+	if err := atomicfile.Write(a.statePath, data, 0o600); err != nil {
+		return IdentityInfo{}, err
+	}
+	return a.GetIdentity(), nil
 }
 
 // ---- stats ----
