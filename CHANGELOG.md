@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+## [v1.0.0-rc.1] - 2026-08-16
+
+### 首个发布候选：完整 18 阶段交付
+
+**功能**：TCP/UDP/HTTP/HTTPS 隧道；Enrollment（一次性 Token + mTLS）；Server 端强制 ACL/限额/限速/资源守卫；运行时 tunnel 控制；本地统计与状态查询；Wails Desktop（Stitch 设计）；三平台 CLI。
+**安全**：TLS 1.3 + mTLS + CA 钉扎；Ed25519 + keystore；redaction 日志；零遥测；威胁模型 T1–T18 审计闭环。
+**工程**：CI 矩阵、e2e 自动化、基准、Fuzz 语料、RC 打包（checksums + SBOM）。
+
+### Changed
+- CLI 增加 `version` 子命令（ldflags 注入版本号）。
+- ValidateClient/ValidateServer 向后兼容旧配置（默认值填充）。
+
+### Fixed（本版本内）
+- 注册帧序竞态（UDP 通道丢失）；旧配置兼容；UDP 端口释放（Windows）；慢读/慢连可用性。
+
+
 ### Added（Phase 16 — 安全审计）
 - T1–T18 威胁模型逐项核对（docs/security/audit-checklist.md：实现+测试证据×状态），以攻击者剧本驱动 PKI/认证/ACL/路径/日志/并发专项审查。
 - 工具链：govulncheck（3 个标准库漏洞需 Go 1.26.6，CI 已用 1.26 补丁版）、go mod verify、os/exec 生产引用=0、依赖白名单对照、secret scan。

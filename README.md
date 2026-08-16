@@ -66,15 +66,31 @@ go test ./...                           # 单元测试
 
 Windows / Linux / macOS × amd64/arm64 均可交叉编译（如 `GOOS=linux GOARCH=arm64 go build ./...`）。CI（GitHub Actions）在三个平台自动执行 vet/build/test，并在 ubuntu/macos 上执行 `-race`。
 
-## 快速开始
+## 快速开始（15 分钟跑通 TCP 穿透）
 
-> 全链路（`client enroll` → `client run` → Tunnel 转发）将在 Phase 3/5 完成后补齐；当前可用：
+> 需要两台机器（或本机两个终端）：**服务器**（公网可达）与**客户端**（内网服务所在）。以下用已构建二进制；开发环境用 `go run ./cmd/...` 等价。
 
 ```sh
-go run ./cmd/server check-config --config examples/server.example.toml   # 解析+校验+打印生效配置
-go run ./cmd/client check-config --config examples/client.example.toml   # 同上（敏感值脱敏）
-# 示例配置为 Linux 风格路径；Windows 部署请先修改 state_dir 为盘符绝对路径
+# ── 服务器（一次性初始化）────────────────────────────────
+cp examples/server.toml /etc/qoqtun/server.toml     # 修改 state_dir 为绝对路径
+qoqtun-server ca init --config /etc/qoqtun/server.toml --san your-domain.com
+qoqtun-server client create-token --config /etc/qoqtun/server.toml   # 记下 qen_... 立即使用
+qoqtun-server run --config /etc/qoqtun/server.toml                    # 常驻（systemd 见 docs/operations/deployment.md）
+
+# ── 客户端（每台设备一次）────────────────────────────────
+cp examples/client.toml ~/.config/qoqtun/client.toml   # 修改 server_addr
+qoqtun-client cert init --name my-laptop --csr-out client.csr
+qoqtun-client enroll --server your-domain.com:7001 --csr client.csr     --state-out state.json --secrets-dir secrets          # token 从 stdin 粘贴
+qoqtun-client run --config ~/.config/qoqtun/client.toml --state state.json --secrets-dir secrets
+
+# ── 验证 ────────────────────────────────────────────────
+ssh -p 22000 user@your-domain.com     # examples/client.toml 里的 ssh 隧道
+# HTTP 隧道：curl -H "Host: app.example.com" http://your-domain.com:28080/
+qoqtun-client tunnel list --state state.json              # 运行时查看
+qoqtun-client status --state state.json                   # 流量统计
 ```
+
+完整生命周期自动化：`bash scripts/e2e.sh`。
 
 初始化身份（私钥永不落明文文件、永不离开设备）：
 
