@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hidxt/qoqtun/internal/metrics"
 	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 
 	"github.com/hidxt/qoqtun/internal/clientcore"
@@ -43,8 +44,9 @@ func newRootCmd() *cobra.Command {
 		newCheckConfigCmd(),
 		newCertCmd(),
 		newEnrollCmd(),
-		newPlaceholderCmd("tunnel", "Manage tunnels (list/start/stop)"),
+		newTunnelCmd(),
 		newStatusCmd(),
+		newCertStatusCmd(),
 	)
 	return root
 }
@@ -140,7 +142,7 @@ func defaultSecretsDir() string {
 }
 
 func newRunCmd() *cobra.Command {
-	var configPath, statePath, caPath, secretsDir, backendStr string
+	var configPath, statePath, caPath, secretsDir, backendStr, serverAddrFlag string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the client (control session + tunnel forwarding)",
@@ -163,7 +165,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runClient(cfg, logger, statePath, caPath, secretsDir, backend)
+			return runClient(cfg, logger, statePath, caPath, secretsDir, backend, serverAddrFlag)
 		},
 	}
 	cmd.Flags().StringVar(&configPath, "config", "", "path to client.toml")
@@ -171,12 +173,13 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&caPath, "ca", "", "path to the server CA certificate")
 	cmd.Flags().StringVar(&secretsDir, "secrets-dir", "", "keystore fallback directory")
 	cmd.Flags().StringVar(&backendStr, "keystore-backend", "auto", "keystore backend: auto|keyring|file")
+	cmd.Flags().StringVar(&serverAddrFlag, "server-addr", "", "override the server control-plane address (config wins otherwise)")
 	return cmd
 }
 
 // runClient loads the identity, builds the control session and runs it
 // until interrupted or disconnected.
-func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath, secretsDir string, backend keystore.BackendPref) error {
+func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath, secretsDir string, backend keystore.BackendPref, serverAddrFlag string) error {
 	st, err := loadClientState(statePath)
 	if err != nil {
 		return fmt.Errorf("load identity (run `client enroll` first): %w", err)
@@ -209,9 +212,13 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 		return fmt.Errorf("client certificate expired (re-enroll with `client enroll`)")
 	}
 
-	// the control plane address comes from the config; the state file only
-	// records the address used at enrollment (which may be the enroll port)
-	serverAddr := cfg.ServerAddr
+	// the control plane address comes from --server-addr, else the config;
+	// the state file only records the address used at enrollment (which
+	// may be the enroll port)
+	serverAddr := serverAddrFlag
+	if serverAddr == "" {
+		serverAddr = cfg.ServerAddr
+	}
 	if serverAddr == "" {
 		serverAddr = st.ServerAddr
 	}
@@ -237,8 +244,16 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 		<-ch // second: force quit
 		os.Exit(130)
 	}()
+	// local control endpoint (loopback + token): powers `client tunnel ...`
+	ipc, err := clientcore.NewIPC(client, logger)
+	if err != nil {
+		return err
+	}
+	defer ipc.Close()
+	logger.Info("local control endpoint ready", "port", ipc.Port())
+
 	// periodic local status snapshot (V1: local query only); the client
-	// status file sits next to the state file
+	// status file sits next to the state file and carries the IPC endpoint
 	statusPath := statePath + ".status.json"
 	go func() {
 		tick := time.NewTicker(2 * time.Second)
@@ -248,7 +263,10 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				data, err := json.MarshalIndent(client.Status(), "", "  ")
+				data, err := json.MarshalIndent(struct {
+					IPC   ipcInfo          `json:"ipc"`
+					Stats metrics.Snapshot `json:"stats"`
+				}{IPC: ipcInfo{Port: ipc.Port(), Token: ipc.Token()}, Stats: client.Status()}, "", "  ")
 				if err != nil {
 					continue
 				}
@@ -257,6 +275,12 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 		}
 	}()
 	return client.Run(ctx)
+}
+
+// ipcInfo mirrors the loopback endpoint address (0600 status file).
+type ipcInfo struct {
+	Port  int    `json:"port"`
+	Token string `json:"token"`
 }
 
 // newStatusCmd implements `client status`: print the local status snapshot.

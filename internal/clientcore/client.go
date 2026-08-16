@@ -52,8 +52,20 @@ type Client struct {
 	seq          uint64
 	missed       atomic.Int32
 	mu           sync.Mutex
+	pendingMu    sync.Mutex
+	pending      map[uint64]chan *protocol.Envelope
 	conn         *transport.Conn
 	closeOnce    sync.Once
+}
+
+// TunnelInfo is the runtime view of one tunnel (`client tunnel list`).
+type TunnelInfo struct {
+	Name       string
+	Type       string
+	LocalIP    string
+	LocalPort  int
+	RemotePort int
+	TunnelID   string
 }
 
 // TunnelSpec is one tunnel to register (mirrors config.TunnelConfig).
@@ -132,6 +144,9 @@ func (c *Client) runSession(ctx context.Context) error {
 	}
 	defer conn.Close()
 	c.conn = conn
+	c.pendingMu.Lock()
+	c.pending = make(map[uint64]chan *protocol.Envelope)
+	c.pendingMu.Unlock()
 	defer func() {
 		c.closeOnce.Do(func() {
 			if c.tunnelClient != nil {
@@ -185,6 +200,13 @@ func (c *Client) runSession(ctx context.Context) error {
 	c.Log.Info("control session established", "server", c.ServerAddr,
 		"session", sh.SessionID, "max_tunnels", sh.Policy.MaxTunnels)
 
+	// read loop: process server frames — MUST be running before the
+	// synchronous register RPCs so their responses are dispatched
+	readErr := make(chan error, 1)
+	go func() {
+		readErr <- c.readLoop()
+	}()
+
 	if err := c.setupTunnels(); err != nil {
 		return fmt.Errorf("clientcore: tunnel setup: %w", err)
 	}
@@ -195,12 +217,6 @@ func (c *Client) runSession(ctx context.Context) error {
 	// heartbeat loop (client pings at interval)
 	ticker := time.NewTicker(time.Duration(c.Heartbeat.IntervalS) * time.Second)
 	defer ticker.Stop()
-
-	// read loop: process server frames
-	readErr := make(chan error, 1)
-	go func() {
-		readErr <- c.readLoop()
-	}()
 
 	for {
 		select {
@@ -235,41 +251,119 @@ func (c *Client) registerConfiguredTunnels(ctx context.Context) error {
 		if !t.Enabled {
 			continue
 		}
-		req := &protocol.RegisterTunnel{
-			Name:       t.Name,
-			Type:       t.Type,
-			RemotePort: t.RemotePort,
-			Local:      protocol.LocalTarget{IP: t.LocalIP, Port: t.LocalPort},
+		if err := c.RegisterTunnel(ctx, t); err != nil {
+			c.Log.Warn("tunnel registration failed", "name", t.Name, "error", err)
 		}
-		if t.Type == "http" && t.HTTPHost != "" {
-			req.HTTP = &protocol.HTTPConfig{Host: t.HTTPHost}
-		}
-		seq := c.nextSeq()
-		if err := c.conn.WriteFrame(protocol.MsgRegisterTunnel, seq, req); err != nil {
-			return err
-		}
-		resp, err := protocol.ReadFrame(c.conn)
-		if err != nil {
-			return err
-		}
-		if resp.Type != protocol.MsgRegisterTunnelResp {
-			return fmt.Errorf("clientcore: unexpected %s during tunnel registration", resp.Type)
-		}
-		var rr protocol.RegisterTunnelResp
-		if err := resp.DecodePayload(&rr); err != nil {
-			return err
-		}
-		if !rr.OK {
-			c.Log.Warn("tunnel registration rejected", "name", t.Name, "code", errCode(rr.Error))
-			continue
-		}
-		c.tunnelClient.RegisterLocal(&tunnel.TunnelConfig{
-			ID: rr.TunnelID, Name: t.Name, Type: t.Type,
-			RemotePort: t.RemotePort, LocalIP: t.LocalIP, LocalPort: t.LocalPort,
-		})
-		c.Log.Info("tunnel registered", "name", t.Name, "tunnel_id", rr.TunnelID, "port", rr.Effective.RemotePort)
 	}
 	return nil
+}
+
+// RegisterTunnel registers one tunnel with the server and the local
+// registry (used at startup for enabled tunnels and at runtime by
+// `client tunnel start`).
+func (c *Client) RegisterTunnel(ctx context.Context, t TunnelSpec) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("clientcore: not connected")
+	}
+	if c.tunnelClient == nil {
+		return fmt.Errorf("clientcore: tunnel client not initialized")
+	}
+	if _, _, ok := c.tunnelClient.FindByName(t.Name); ok {
+		return fmt.Errorf("tunnel %q already running", t.Name)
+	}
+	req := &protocol.RegisterTunnel{
+		Name:       t.Name,
+		Type:       t.Type,
+		RemotePort: t.RemotePort,
+		Local:      protocol.LocalTarget{IP: t.LocalIP, Port: t.LocalPort},
+	}
+	if t.Type == "http" && t.HTTPHost != "" {
+		req.HTTP = &protocol.HTTPConfig{Host: t.HTTPHost}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	env, err := c.rpc(ctx, protocol.MsgRegisterTunnel, req)
+	if err != nil {
+		return err
+	}
+	if env.Type != protocol.MsgRegisterTunnelResp {
+		return fmt.Errorf("clientcore: unexpected %s during tunnel registration", env.Type)
+	}
+	var rr protocol.RegisterTunnelResp
+	if err := env.DecodePayload(&rr); err != nil {
+		return err
+	}
+	if !rr.OK {
+		return fmt.Errorf("tunnel %q rejected: %s: %s", t.Name, errCode(rr.Error), errMsg(rr.Error))
+	}
+	c.tunnelClient.RegisterLocal(&tunnel.TunnelConfig{
+		ID: rr.TunnelID, Name: t.Name, Type: t.Type,
+		RemotePort: t.RemotePort, LocalIP: t.LocalIP, LocalPort: t.LocalPort,
+	})
+	c.Log.Info("tunnel registered", "name", t.Name, "tunnel_id", rr.TunnelID, "port", rr.Effective.RemotePort)
+	return nil
+}
+
+// UnregisterTunnel stops one tunnel (server unregister + local removal).
+func (c *Client) UnregisterTunnel(ctx context.Context, name string) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("clientcore: not connected")
+	}
+	if c.tunnelClient == nil {
+		return fmt.Errorf("clientcore: tunnel client not initialized")
+	}
+	tc, tid, ok := c.tunnelClient.FindByName(name)
+	if !ok {
+		return fmt.Errorf("tunnel %q not running", name)
+	}
+	_ = tc
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	env, err := c.rpc(ctx, protocol.MsgUnregisterTunnel, &protocol.UnregisterTunnel{TunnelID: tid})
+	if err != nil {
+		return err
+	}
+	var rr protocol.RegisterTunnelResp
+	if err := env.DecodePayload(&rr); err != nil {
+		return err
+	}
+	if !rr.OK {
+		return fmt.Errorf("tunnel %q stop rejected: %s", name, errCode(rr.Error))
+	}
+	c.tunnelClient.UnregisterLocal(tid)
+	c.Log.Info("tunnel stopped", "name", name, "tunnel_id", tid)
+	return nil
+}
+
+// TunnelList returns the runtime tunnel states for `client tunnel list`.
+func (c *Client) TunnelList() []TunnelInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]TunnelInfo, 0)
+	if c.tunnelClient == nil {
+		return out
+	}
+	for _, tc := range c.tunnelClient.LocalSnapshot() {
+		out = append(out, TunnelInfo{
+			Name: tc.Name, Type: tc.Type,
+			LocalIP: tc.LocalIP, LocalPort: tc.LocalPort,
+			RemotePort: tc.RemotePort, TunnelID: tc.ID,
+		})
+	}
+	return out
+}
+
+func errMsg(e *protocol.Error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
 }
 
 func errCode(e *protocol.Error) string {
@@ -305,6 +399,15 @@ func (c *Client) readLoop() error {
 			}
 		case protocol.MsgOpenConnection:
 			c.handleOpenConnection(env)
+		case protocol.MsgRegisterTunnelResp:
+			// synchronous register/unregister replies are dispatched to the
+			// pending waiter (tunnel start/stop via IPC)
+			if ch := c.takePending(env.Seq); ch != nil {
+				select {
+				case ch <- env:
+				default:
+				}
+			}
 		case protocol.MsgShutdown:
 			return ErrGracefulShutdown
 		default:
@@ -327,6 +430,43 @@ func (c *Client) handleOpenConnection(env *protocol.Envelope) {
 			c.Log.Warn("clientcore: data connection failed", "conn_id", oc.ConnID[:min(8, len(oc.ConnID))], "error", err)
 		}
 	}()
+}
+
+func (c *Client) takePending(seq uint64) chan *protocol.Envelope {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	ch := c.pending[seq]
+	delete(c.pending, seq)
+	return ch
+}
+
+// rpc sends a request frame and waits for the matching response (used by
+// tunnel start/stop from the local control endpoint; the read loop owns
+// the connection, so replies flow through the pending table).
+func (c *Client) rpc(ctx context.Context, msgType string, req any) (*protocol.Envelope, error) {
+	seq := c.nextSeq()
+	ch := make(chan *protocol.Envelope, 1)
+	c.pendingMu.Lock()
+	c.pending[seq] = ch
+	c.pendingMu.Unlock()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		c.takePending(seq)
+		return nil, fmt.Errorf("clientcore: not connected")
+	}
+	if err := conn.WriteFrame(msgType, seq, req); err != nil {
+		c.takePending(seq)
+		return nil, err
+	}
+	select {
+	case env := <-ch:
+		return env, nil
+	case <-ctx.Done():
+		c.takePending(seq)
+		return nil, ctx.Err()
+	}
 }
 
 func (c *Client) nextSeq() uint64 {

@@ -30,13 +30,15 @@ func TestCheckConfigWithExample(t *testing.T) {
 	}
 }
 
-func TestPlaceholderSubcommands(t *testing.T) {
-	out, err := runRoot(t, "tunnel")
+func TestTunnelHelp(t *testing.T) {
+	out, err := runRoot(t, "tunnel", "--help")
 	if err != nil {
-		t.Fatalf("tunnel placeholder must not error: %v", err)
+		t.Fatalf("tunnel help must not error: %v", err)
 	}
-	if !strings.Contains(out, "not implemented yet") {
-		t.Fatalf("tunnel placeholder output missing marker: %s", out)
+	for _, marker := range []string{"list", "start", "stop", "127.0.0.1"} {
+		if !strings.Contains(out, marker) {
+			t.Fatalf("tunnel help missing %q: %s", marker, out)
+		}
 	}
 }
 

@@ -74,11 +74,34 @@ func (c *Client) RegisterLocal(tc *TunnelConfig) {
 	c.tunnels[tc.ID] = tc
 }
 
-// UnregisterLocal removes a tunnel.
+// UnregisterLocal removes a tunnel from the local registry (tunnel stop).
 func (c *Client) UnregisterLocal(tunnelID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.tunnels, tunnelID)
+}
+
+// FindByName looks up a tunnel by config name; returns its config and id.
+func (c *Client) FindByName(name string) (*TunnelConfig, string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, tc := range c.tunnels {
+		if tc.Name == name {
+			return tc, id, true
+		}
+	}
+	return nil, "", false
+}
+
+// LocalSnapshot returns a copy of the registered tunnels (tunnel list).
+func (c *Client) LocalSnapshot() []TunnelConfig {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]TunnelConfig, 0, len(c.tunnels))
+	for _, tc := range c.tunnels {
+		out = append(out, *tc)
+	}
+	return out
 }
 
 // Get returns the tunnel config.
