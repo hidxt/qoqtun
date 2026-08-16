@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added（Phase 10 — 统计与日志完善）
+- `internal/metrics`：atomic 计数器集（per-client/per-tunnel rx/tx/active/total conns、UDP 包数、全局汇总）、滑动窗口速率（1s×60s）、Snapshot 值拷贝无锁读；**只含元数据，无载荷，禁止遥测**。
+- 全转发路径接线：TCP/HTTP splice 结果（server + client 双侧，方向对称）、HTTP vhost 嗅探+回放前缀计入、UDP 帧级计数（OnUDPStats）。
+- `server status` / `client status`：V1 本机查询——run 进程每 2s 原子写 status.json（0600），status 命令读盘打印。
+- 日志完善：DefaultFloodGuard 采样（同类消息每分钟 ≤5 条 + 抑制摘要）；redaction 补 JWT 值模式；RedactWrap 便于任意 handler 加固。
+- 测试：10MiB 转发 rx/tx 误差为 0、UDP 包数、vhost 回放计数、连接生命周期（集成）；并发计数/快照一致性 -race、速率窗口、采样行为、redaction 含私钥/Token/JWT 断言（单测）。
+- docs/metrics.md（字段字典）。
+
 ### Added（Phase 9 — ACL、限速、连接限额、资源保护）
 - `internal/security`：并发信号量（per-client/per-tunnel，满则立即拒绝不排队）、token bucket 带宽限速（x/time/rate，读/写双向、连接关闭释放等待者）、每公网 IP 连接门（并发+速率）、RLIMIT_NOFILE/root 启动守卫（可注入检测函数）。
 - Server 强制执行点：注册频率限制（5/s burst 32）、控制消息速率（200/s 超限 ERR_RATE_LIMITED 断连）、allowed_targets **注册时校验**（ERR_TARGET_NOT_ALLOWED，客户端拨号前双保险）、数据连接 quota+限速包装（TCP splice 与 UDP 通道一致）。
