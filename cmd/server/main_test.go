@@ -90,3 +90,34 @@ func TestRunPlaceholder(t *testing.T) {
 		t.Fatalf("run placeholder should succeed: %v", err)
 	}
 }
+
+func TestCAInit(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	path := filepath.Join(t.TempDir(), "server.toml")
+	content := "state_dir = " + tomlStr(filepath.ToSlash(stateDir)) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runRoot(t, "ca", "init", "--config", path)
+	if err != nil {
+		t.Fatalf("ca init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "CA fingerprint") {
+		t.Fatalf("output missing fingerprint: %s", out)
+	}
+	for _, f := range []string{"ca/ca.key", "ca/ca.crt", "server/server.key", "server/server.crt"} {
+		if _, err := os.Stat(filepath.Join(stateDir, f)); err != nil {
+			t.Fatalf("expected %s: %v", f, err)
+		}
+	}
+	// idempotency: second init must fail without --force
+	_, err = runRoot(t, "ca", "init", "--config", path)
+	if err == nil {
+		t.Fatal("ca init must refuse to overwrite existing CA without --force")
+	}
+	// --force overwrites
+	if _, err := runRoot(t, "ca", "init", "--config", path, "--force"); err != nil {
+		t.Fatalf("ca init --force failed: %v", err)
+	}
+}

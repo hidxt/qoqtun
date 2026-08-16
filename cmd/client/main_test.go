@@ -2,8 +2,11 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hidxt/qoqtun/internal/platform/keystore"
 )
 
 func runRoot(t *testing.T, args ...string) (string, error) {
@@ -28,7 +31,7 @@ func TestCheckConfigWithExample(t *testing.T) {
 }
 
 func TestPlaceholderSubcommands(t *testing.T) {
-	for _, sub := range []string{"cert", "enroll", "tunnel"} {
+	for _, sub := range []string{"enroll", "tunnel"} {
 		out, err := runRoot(t, sub)
 		if err != nil {
 			t.Fatalf("%s placeholder must not error: %v", sub, err)
@@ -36,6 +39,59 @@ func TestPlaceholderSubcommands(t *testing.T) {
 		if !strings.Contains(out, "not implemented yet") {
 			t.Fatalf("%s placeholder output missing marker: %s", sub, out)
 		}
+	}
+}
+
+func TestCertInit(t *testing.T) {
+	dir := t.TempDir()
+	csrOut := filepath.Join(dir, "client.csr")
+	secretsDir := filepath.Join(dir, "secrets")
+	out, err := runRoot(t, "cert", "init",
+		"--name", "test-device",
+		"--csr-out", csrOut,
+		"--secrets-dir", secretsDir,
+		"--keystore-backend", "file")
+	if err != nil {
+		t.Fatalf("cert init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "client_id: cl_") {
+		t.Fatalf("output missing client_id: %s", out)
+	}
+	if !strings.Contains(out, "keystore:  file") {
+		t.Fatalf("output missing keystore backend: %s", out)
+	}
+	// CSR file exists and is a valid PEM CSR
+	csrData, err := os.ReadFile(csrOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(csrData), "CERTIFICATE REQUEST") {
+		t.Fatal("CSR output is not a valid PEM request")
+	}
+	// private key stored in the file keystore
+	if _, err := os.Stat(filepath.Join(secretsDir, "client-key.key")); err != nil {
+		t.Fatalf("keystore entry missing: %v", err)
+	}
+}
+
+func TestCertInitStoresKeyInKeystore(t *testing.T) {
+	dir := t.TempDir()
+	csrOut := filepath.Join(dir, "c.csr")
+	secretsDir := filepath.Join(dir, "secrets")
+	if _, err := runRoot(t, "cert", "init", "--csr-out", csrOut, "--secrets-dir", secretsDir,
+		"--keystore-backend", "file"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := keystore.NewFileStore(secretsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err := store.Get("client-key")
+	if err != nil {
+		t.Fatalf("client-key not in keystore: %v", err)
+	}
+	if !strings.Contains(string(keyPEM), "PRIVATE KEY") {
+		t.Fatal("stored key is not PEM")
 	}
 }
 
