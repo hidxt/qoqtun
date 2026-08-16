@@ -99,6 +99,10 @@ TCP 穿透（Phase 5 起可用；client.toml 配置 `[[tunnels]]` 后启动 clie
 ```sh
 go run ./cmd/server run --config server.toml     # 启动控制面（含公网 Tunnel 监听）
 go run ./cmd/client run --config client.toml     # 注册隧道、建立数据连接并转发
+go run ./cmd/client tunnel list --state state.json   # 运行时查看隧道
+go run ./cmd/client tunnel start web --remote-port 22000 --local 127.0.0.1:8080  # 运行时启停
+go run ./cmd/client tunnel stop web
+go run ./cmd/client status --state state.json    # 流量统计（client）；server 端同：qoqtun-server status
 # 示例：client.toml 中 tunnels.ssh{type=tcp, remote_port=22000, local=127.0.0.1:22}
 # 公网访问: ssh -p 22000 user@server
 ```

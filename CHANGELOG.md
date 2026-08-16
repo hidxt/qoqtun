@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added（Phase 11 — Client CLI 完整化）
+- 运行时 tunnel 控制：`client tunnel list/start/stop/status`，通过 127.0.0.1 本地控制端点（随机端口 + CSPRNG token，0600 状态文件承载）；start/stop 仅运行时生效（V1 配置变更=重启生效）。
+- clientcore：per-tunnel 动态注册/注销（`RegisterTunnel`/`UnregisterTunnel`）+ **pending RPC 机制**（同步 register 响应经 readLoop 分发，修复控制连接读写竞争）。
+- `client cert status`（client_id/server/CA 指纹/到期，无敏感）；全局 `--server-addr` 覆盖 flag（flag > config > state）。
+- 服务化文档（docs/operations/deployment.md：systemd 加固示例/launchd/schtasks）；cobra completion 已可用。
+- `scripts/e2e.sh`：完整生命周期自动化（build→ca→token→enroll→run→TCP 转发→IPC start/stop→优雅退出→日志无敏感），本机跑通 8/8。
+- docs/cli-reference.md；README 快速开始可复制执行。
+
 ### Added（Phase 10 — 统计与日志完善）
 - `internal/metrics`：atomic 计数器集（per-client/per-tunnel rx/tx/active/total conns、UDP 包数、全局汇总）、滑动窗口速率（1s×60s）、Snapshot 值拷贝无锁读；**只含元数据，无载荷，禁止遥测**。
 - 全转发路径接线：TCP/HTTP splice 结果（server + client 双侧，方向对称）、HTTP vhost 嗅探+回放前缀计入、UDP 帧级计数（OnUDPStats）。
