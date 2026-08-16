@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added（Phase 8 — HTTP/HTTPS Tunnel）
+- `type=http` 双模式：vhost（remote_port=0 + http_host，共享 `http_vhost_port` 按 Host 路由，精确+最长后缀匹配、大小写/端口/尾点归一化）+ 独占端口退化（TCP 语义）。
+- `type=https`：纯 L4 Passthrough 别名（强制 remote_port，端到端 TLS 不过 Server，无 SNI 路由）。
+- Host 嗅探器：限读 8KiB/5s、读到 Host 头即停、绝对 URI 支持、RFC1123 校验、保守解析（folded/超大/非法拒绝）、已读字节原样前置回放（ReplayConn）。
+- vhost 路由表：注册/注销原子更新、同 Host 冲突 ERR_NAME_CONFLICT、共享监听引用计数生命周期（首注册启动/末注销关闭）。
+- 无匹配 421、嗅探失败 400；slowloris 兜底（5s deadline 清理，不堆积）。
+- 测试：多 Host 路由、归一化、421、冲突、WebSocket 升级透传、SSE 12s 长连接、大 Header 拒绝、100 慢连接 slowloris、HTTPS 证书链未终止断言、退化模式、协议校验（https 强制端口）；FuzzHostSniff ≥60s（420 万次）。
+- 手工 curl 验证：多 Host 路由/大小写/421/400 全过。
+- 修复：vhost 路径 publicConn 的 10s claim deadline 未清除导致长连接 10s 断流（splice 前清除）。
+
 ### Added（Phase 7 — UDP Tunnel）
 
 - `internal/tunnel` UDP 实现：UDP Public Listener（按隧道注册）；session 映射（(tunnel,对端addr)→16B CSPRNG id）；LRU 上限（默认 256/tunnel，满淘汰最久未活跃+审计）；每公网 IP pps 限速（5/s burst 10，Server 强制）；空闲 60s 清扫；通道帧 `[4B len][session_id 16B][payload]`（max_packet 1500/硬上限 65507，超限丢弃计数）。

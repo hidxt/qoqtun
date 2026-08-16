@@ -103,6 +103,20 @@ go run ./cmd/client run --config client.toml     # 注册隧道、建立数据�
 # 公网访问: ssh -p 22000 user@server
 ```
 
+HTTP/HTTPS 穿透（Phase 8 起可用；HTTP 多站点共享一个公网端口按 Host 路由，HTTPS 为纯 L4 透传独占端口）：
+
+```sh
+# server.toml: [listen] http_vhost_port = 28080
+# client.toml:
+#   [[tunnels]]  # 两个 HTTP 站点共享 28080，按 Host 路由
+#   name = "siteA"; type = "http"; remote_port = 0; http_host = "a.example.com"; local_ip = "127.0.0.1"; local_port = 8080
+#   [[tunnels]]  # HTTPS 独占端口（端到端 TLS 不过 Server）
+#   name = "tls"; type = "https"; remote_port = 28443; local_ip = "127.0.0.1"; local_port = 8443
+# 公网访问: curl -H "Host: a.example.com" http://server:28080/ ; https://server:28443/
+```
+
+行为矩阵与安全语义见 [docs/http-https.md](docs/http-https.md)。
+
 ## 文档
 
 - 开发规划与设计文档（唯一事实来源）：[docs/plan/README.md](docs/plan/README.md)
