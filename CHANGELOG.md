@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Added（Phase 4 — Control Protocol、mTLS 传输、Session）
+
+- `internal/protocol`：4B 长度前缀 + JSON 信封（nonce 随机、ts、≤64KiB 超限即断）；§2 全部 13 种消息结构体；逐字段校验器（端口/名称/枚举/地址/限额）；错误码表；版本协商（不符→ERR_VERSION_UNSUPPORTED）；帧编解码可独立 Fuzz。
+- `internal/transport`：mTLS Listener/Dialer 工厂（TLS 1.3、RequireAndVerifyClientCert、CA 池多根、VerifyPeerCertificate=吊销+身份）；Conn 包装（write mutex、deadline、PeerID 提取）。
+- `internal/session`：client_id→Session 注册表（线程安全、资源计数钩子留 Phase 9）、活跃时间跟踪。
+- `internal/control`（Server）：Accept 循环（每 IP 半开连接限制 8 + 10s 握手超时）→ client_hello 校验（CN==client_id、版本）→ server_hello（policy 组装）→ 心跳监督（2×interval+timeout 踢除）→ 断连会话释放。
+- `internal/clientcore`（Client）：拨号→握手→收 policy→心跳循环（interval ping / miss_threshold 判死）→ 断线退出（重连 Phase 6）。
+- 测试：协议编解码表驱动正反例；**三个 Fuzz 目标各 ≥60s**（DecodeFrame/ValidateMessage/EncodeRoundTrip，合计 1200 万+ 次执行无崩溃）；集成：真实 mTLS 握手+心跳维持、伪造 client_id 拒绝、版本不符拒绝、吊销拒绝、帧超限、心跳超时踢除、断连会话释放。
+- 文档：[docs/protocol-state.md](docs/protocol-state.md) 三态状态机；04-protocol-v1.md 校对一致（nonce/ts 自动填充）。
+
 ### Added（Phase 3 — Enrollment、Token、签发与吊销）
 
 - `internal/auth`：Enrollment Token（32B crypto/rand → `qen_`+base62 展示、8B token_id）；tokens.json（只存 SHA-256 哈希、0600 原子写、惰性过期清理）；`Consume` 写锁内原子核销（防双花）；`Revoke`；跨进程文件变更重载（独立 `enroll serve` 感知新 token）。
