@@ -56,11 +56,25 @@ qoqtun 包含三个程序：**Server CLI**、**Client CLI**、**Client Desktop**
 
 ## 构建
 
-> 占位：Phase 1 起逐步补齐构建说明（Go 1.22+，单一 go.mod；Windows / Linux / macOS × amd64 / arm64）。
+要求：Go 1.22+（单一 go.mod）。
+
+```sh
+go build ./...                          # 构建全部程序（cmd/server、cmd/client）
+scripts/check.sh                        # 一键检查：fmt → vet → build → 三平台交叉编译 → test → race
+go test ./...                           # 单元测试
+```
+
+Windows / Linux / macOS × amd64/arm64 均可交叉编译（如 `GOOS=linux GOARCH=arm64 go build ./...`）。CI（GitHub Actions）在三个平台自动执行 vet/build/test，并在 ubuntu/macos 上执行 `-race`。
 
 ## 快速开始
 
-> 占位：`server ca init` → `server client create-token` → `client enroll` → `client run` 全链路示例将在 Phase 3/5 完成后补齐。
+> 全链路（`server ca init` → `server client create-token` → `client enroll` → `client run`）将在 Phase 3/5 完成后补齐；当前 Phase 1 提供配置校验：
+
+```sh
+go run ./cmd/server check-config --config examples/server.example.toml   # 解析+校验+打印生效配置
+go run ./cmd/client check-config --config examples/client.example.toml   # 同上（敏感值脱敏）
+# 示例配置为 Linux 风格路径；Windows 部署请先修改 state_dir 为盘符绝对路径
+```
 
 ## 文档
 

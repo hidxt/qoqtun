@@ -5,6 +5,7 @@
 
 # ===== 必填（无默认值）=====
 state_dir = "/var/lib/qoqtun"          # CA/证书/吊销/Token/客户端登记所在目录；校验：绝对路径、存在或可由当前用户创建
+                                       # <示例为 Linux 路径；Windows 部署请改用盘符绝对路径，如 "C:\\qoqtun\\state">
 
 # ===== 网络监听 =====
 [listen]

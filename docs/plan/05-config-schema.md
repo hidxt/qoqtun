@@ -59,11 +59,9 @@ file = ""                              # ""=stderr；写文件时 0640 + 目录�
 server_addr = "tunnel.example.com:7000"   # hostname 或 IP + 端口；hostname 须 RFC1123
 ca_fingerprint = ""                       # 可选：钉扎 CA 证书 SHA-256（首次 enroll 可 --trust-on-first-use 显式确认）
 
-[identity]
-# client_id 由 cert init 生成并持久化于安全状态文件，不在此手写
-
-[tls]
-# 无 insecure 选项 —— 设计上不存在
+# identity / tls 无配置字段，仅注释说明（严格模式拒绝未知字段，空表头不可出现）：
+#   [identity]  # client_id 由 cert init 生成并持久化于安全状态文件，不在此手写
+#   [tls]       # 无 insecure 选项 —— 设计上不存在
 
 [reconnect]
 initial_backoff = "1s"
