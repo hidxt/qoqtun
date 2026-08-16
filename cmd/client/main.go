@@ -5,12 +5,16 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
+
+	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 
 	"github.com/hidxt/qoqtun/internal/clientcore"
 	"github.com/hidxt/qoqtun/internal/config"
@@ -40,6 +44,7 @@ func newRootCmd() *cobra.Command {
 		newCertCmd(),
 		newEnrollCmd(),
 		newPlaceholderCmd("tunnel", "Manage tunnels (list/start/stop)"),
+		newStatusCmd(),
 	)
 	return root
 }
@@ -232,7 +237,48 @@ func runClient(cfg *config.ClientConfig, logger *slog.Logger, statePath, caPath,
 		<-ch // second: force quit
 		os.Exit(130)
 	}()
+	// periodic local status snapshot (V1: local query only); the client
+	// status file sits next to the state file
+	statusPath := statePath + ".status.json"
+	go func() {
+		tick := time.NewTicker(2 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				data, err := json.MarshalIndent(client.Status(), "", "  ")
+				if err != nil {
+					continue
+				}
+				_ = atomicfile.Write(statusPath, data, 0o600)
+			}
+		}
+	}()
 	return client.Run(ctx)
+}
+
+// newStatusCmd implements `client status`: print the local status snapshot.
+func newStatusCmd() *cobra.Command {
+	var statePath string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show the local client status snapshot",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if statePath == "" {
+				statePath = defaultStatePath()
+			}
+			data, err := os.ReadFile(statePath + ".status.json")
+			if err != nil {
+				return fmt.Errorf("no status file yet (client run must be active): %w", err)
+			}
+			os.Stdout.Write(data)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&statePath, "state", "", "path to state.json")
+	return cmd
 }
 
 // tunnelsToSpecs converts config tunnels to clientcore specs.

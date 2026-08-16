@@ -29,6 +29,10 @@ type Manager struct {
 	// control plane can pre-open a replacement (Phase 6 reconnect semantics).
 	OnUDPChannelClosed func(t *Tunnel)
 
+	// OnUDPStats receives UDP packet counters per tunnel (rx = from public,
+	// tx = to public) for the metrics registry (Phase 10).
+	OnUDPStats func(tunnelID string, rx, tx int64)
+
 	mu      sync.Mutex
 	seq     uint64
 	tunnels map[string]*Tunnel      // tunnel_id
@@ -169,6 +173,9 @@ func (m *Manager) HandleUDPPacket(t *Tunnel, peer *net.UDPAddr, payload []byte) 
 	if _, err := ch.Write(frame); err != nil {
 		m.Log.Warn("udp: channel write failed", "tunnel", t.ID, "error", err)
 	}
+	if m.OnUDPStats != nil {
+		m.OnUDPStats(t.ID, 1, 0) // one packet received from the public side
+	}
 }
 
 // SetUDPChannel binds the client's UDP data channel and starts the return
@@ -198,6 +205,10 @@ func (m *Manager) udpChannelReadLoop(ctx context.Context, t *Tunnel, ch net.Conn
 		}
 		if _, err := t.udp.conn.WriteToUDP(payload, sess.peer); err != nil {
 			m.Log.Debug("udp: write to peer failed", "tunnel", t.ID, "error", err)
+			continue
+		}
+		if m.OnUDPStats != nil {
+			m.OnUDPStats(t.ID, 0, 1) // one packet sent to the public side
 		}
 	}
 	// channel dropped: clear it and let the control plane rebuild it

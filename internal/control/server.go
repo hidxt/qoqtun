@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hidxt/qoqtun/internal/config"
+	"github.com/hidxt/qoqtun/internal/metrics"
 	"github.com/hidxt/qoqtun/internal/protocol"
 	"github.com/hidxt/qoqtun/internal/security"
 	"github.com/hidxt/qoqtun/internal/session"
@@ -65,6 +66,9 @@ type Server struct {
 	// IP gate tunables (defaults suit production; tests raise them).
 	IPGateMaxConns   int
 	IPGateRatePerSec float64
+
+	// Metrics collects local traffic statistics (Phase 10); nil disables.
+	Metrics *metrics.Registry
 
 	Sessions *session.Registry
 
@@ -162,6 +166,9 @@ func (s *Server) Serve(ctx context.Context, ln *transport.Listener) error {
 	}
 	if s.regLim == nil {
 		s.regLim = make(map[string]*rate.Limiter)
+	}
+	if s.Metrics == nil {
+		s.Metrics = metrics.NewRegistry()
 	}
 	if s.ipGate == nil {
 		maxConns := s.IPGateMaxConns
@@ -289,6 +296,9 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 			_ = conn.Close()
 			return
 		}
+		if s.Metrics != nil {
+			s.Metrics.ConnOpened(peerID, t.ID)
+		}
 		m := s.managerFor(peerID)
 		m.SetUDPChannel(ctx, t, security.NewRateLimitedConn(conn,
 			s.clientBucket(peerID), s.tunnelBucket(t.ID)))
@@ -308,7 +318,11 @@ func (s *Server) handleDataConn(ctx context.Context, conn *transport.Conn, peerI
 	res := <-tunnel.Splice(publicConn, conn, 32*1024)
 	s.Log.Info("data connection closed", "conn_id", od.ConnID[:min(8, len(od.ConnID))],
 		"rx", res.BytesToA, "tx", res.BytesToB)
-	// close_connection accounting hook (Phase 9 metrics wire here)
+	// metrics: rx = bytes to public side (client read), tx = bytes from
+	// public side; the vhost replay prefix is counted by the splice too
+	if s.Metrics != nil {
+		s.Metrics.RecordConn(peerID, t.ID, res.BytesToB, res.BytesToA)
+	}
 }
 
 // handleControlConn is the original Phase 4 control lifecycle.
@@ -528,6 +542,9 @@ func (s *Server) handleRegisterTunnel(ctx context.Context, conn *transport.Conn,
 			_ = publicConn.Close()
 			return
 		}
+		if s.Metrics != nil {
+			s.Metrics.ConnOpened(sess.ClientID, t.ID)
+		}
 		// bandwidth shaping: per-client + per-tunnel token buckets
 		// (release happens at the splice owner, handleDataConn)
 		wrapped := security.NewRateLimitedConn(publicConn,
@@ -645,6 +662,11 @@ func (s *Server) managerFor(clientID string) *tunnel.Manager {
 		m.UDPIdleTimeout = s.UDPIdleTimeout
 		m.UDPMaxSessions = s.UDPMaxSessions
 		m.UDPMaxPacket = s.UDPMaxPacket
+		m.OnUDPStats = func(tunnelID string, rx, tx int64) {
+			if s.Metrics != nil {
+				s.Metrics.RecordUDP(clientID, tunnelID, rx, tx)
+			}
+		}
 		m.OnUDPChannelClosed = func(t *tunnel.Tunnel) {
 			// release the quota held for this channel, then pre-open a
 			// replacement (Phase 6 reconnect path)
@@ -692,6 +714,35 @@ func (s *Server) checkPortArbitration(port int, clientID string) error {
 		delete(s.reservations, port)
 	}
 	return nil
+}
+
+// StatusSnapshot is a point-in-time view for `server status`.
+type StatusSnapshot struct {
+	Sessions    int
+	TunnelCount int
+	VhostHosts  int
+	ActiveConns int64
+	Metrics     metrics.Snapshot
+}
+
+// Status returns a copy of the server's local state (V1: local query only).
+func (s *Server) Status() StatusSnapshot {
+	conns := int64(0)
+	if s.Metrics != nil {
+		conns = s.Metrics.Snapshot().GlobalConns
+	}
+	sn := StatusSnapshot{
+		Sessions:    s.Sessions.Len(),
+		VhostHosts:  s.VhostCount(),
+		ActiveConns: conns,
+	}
+	for _, m := range s.Managers() {
+		sn.TunnelCount += m.TunnelCount()
+	}
+	if s.Metrics != nil {
+		sn.Metrics = s.Metrics.Snapshot()
+	}
+	return sn
 }
 
 // SetPolicyForTests overrides the resolved policy (integration tests only;

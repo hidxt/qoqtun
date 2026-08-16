@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/hidxt/qoqtun/internal/control"
 	"github.com/hidxt/qoqtun/internal/logging"
 	"github.com/hidxt/qoqtun/internal/pki"
+	"github.com/hidxt/qoqtun/internal/platform/atomicfile"
 	"github.com/hidxt/qoqtun/internal/security"
 	"github.com/hidxt/qoqtun/internal/transport"
 	"github.com/spf13/cobra"
@@ -39,7 +41,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newRunCmd(), newCheckConfigCmd(), newCACmd())
+	root.AddCommand(newRunCmd(), newCheckConfigCmd(), newCACmd(), newStatusCmd())
 	root.AddCommand(newEnrollCmds()...)
 	return root
 }
@@ -163,6 +165,49 @@ func runCAInit(cmd *cobra.Command, cfg *config.ServerConfig, force bool, sans []
 	return nil
 }
 
+// writeStatusLoop snapshots the server state to status.json every 2s.
+func writeStatusLoop(ctx context.Context, srv *control.Server, path string, logger *slog.Logger) {
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			data, err := json.MarshalIndent(srv.Status(), "", "  ")
+			if err != nil {
+				continue
+			}
+			if err := atomicfile.Write(path, data, 0o600); err != nil {
+				logger.Debug("status write failed", "error", err)
+			}
+		}
+	}
+}
+
+// newStatusCmd implements `server status`: print the local status snapshot.
+func newStatusCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show the local server status snapshot",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadServerConfig(configPath)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(filepath.Join(cfg.StateDir, "status.json"))
+			if err != nil {
+				return fmt.Errorf("no status file yet (server run must be active): %w", err)
+			}
+			os.Stdout.Write(data)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "path to server.toml")
+	return cmd
+}
+
 func newRunCmd() *cobra.Command {
 	var (
 		configPath string
@@ -280,6 +325,10 @@ func runServer(cfg *config.ServerConfig, logger *slog.Logger, pprofAddr string) 
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// periodic local status snapshot (V1: local query only, no remote
+	// management channel); read by `server status`
+	statusPath := filepath.Join(cfg.StateDir, "status.json")
+	go writeStatusLoop(ctx, srv, statusPath, logger)
 	// graceful shutdown: broadcast shutdown to clients, drain, then exit
 	go func() {
 		<-ctx.Done()

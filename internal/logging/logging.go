@@ -9,14 +9,34 @@ import (
 	"strings"
 )
 
-// New creates a slog.Logger with the given level, format and output file.
-//
-//	level:  debug | info | warn | error
-//	format: json | text
-//	file:   "" writes to stderr; otherwise the log file is created with
-//	        0640 permissions (directory must exist or be creatable).
-//
-// The returned handler always applies RedactAttr.
+// NewFloodGuarded is like New but also wraps the handler with the default
+// anti-flood sampler (at most 5 identical messages per minute).
+func NewFloodGuarded(level, format, file string) (*slog.Logger, error) {
+	lvl, err := parseLevel(level)
+	if err != nil {
+		return nil, err
+	}
+	opts := &slog.HandlerOptions{Level: lvl, ReplaceAttr: RedactAttr}
+	var out io.Writer = os.Stderr
+	if file != "" {
+		f, err := openLogFile(file)
+		if err != nil {
+			return nil, err
+		}
+		out = f
+	}
+	var h slog.Handler
+	switch strings.ToLower(format) {
+	case "json":
+		h = slog.NewJSONHandler(out, opts)
+	case "text", "":
+		h = slog.NewTextHandler(out, opts)
+	default:
+		return nil, fmt.Errorf("invalid log format %q (want json|text)", format)
+	}
+	return slog.New(DefaultFloodGuard(h)), nil
+}
+
 func New(level, format, file string) (*slog.Logger, error) {
 	lvl, err := parseLevel(level)
 	if err != nil {

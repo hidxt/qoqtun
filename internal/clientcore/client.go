@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hidxt/qoqtun/internal/metrics"
 	"github.com/hidxt/qoqtun/internal/protocol"
 	"github.com/hidxt/qoqtun/internal/transport"
 	"github.com/hidxt/qoqtun/internal/tunnel"
@@ -41,6 +42,10 @@ type Client struct {
 
 	// Backoff controls reconnect timing (default: 1s x2 max 60s +-20%).
 	Backoff BackoffConfig
+
+	// Metrics collects local traffic statistics (client status); lazily
+	// created on first use.
+	metrics *metrics.Registry
 
 	tunnelClient *tunnel.Client
 	manager      *Manager
@@ -70,7 +75,25 @@ func (c *Client) setupTunnels() error {
 		return err
 	}
 	c.tunnelClient = tc
+	c.tunnelClient.Metrics = c.Metrics()
+	c.tunnelClient.ClientID = c.ClientID
 	return nil
+}
+
+// Status returns the client's local statistics snapshot.
+func (c *Client) Status() metrics.Snapshot {
+	if c.metrics == nil {
+		return metrics.Snapshot{}
+	}
+	return c.metrics.Snapshot()
+}
+
+// Metrics returns (creating if needed) the local registry.
+func (c *Client) Metrics() *metrics.Registry {
+	if c.metrics == nil {
+		c.metrics = metrics.NewRegistry()
+	}
+	return c.metrics
 }
 
 // Run drives the connection manager: it repeatedly establishes sessions,

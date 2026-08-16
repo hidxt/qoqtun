@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hidxt/qoqtun/internal/metrics"
 	"github.com/hidxt/qoqtun/internal/protocol"
 	"github.com/hidxt/qoqtun/internal/transport"
 )
@@ -23,6 +24,10 @@ type Client struct {
 	// DialLocal overrides the origin dial (tests).
 	DialLocal func(ctx context.Context, ip string, port int) (net.Conn, error)
 	Log       *slog.Logger
+
+	// Metrics records local traffic (client status); ClientID keys it.
+	Metrics  *metrics.Registry
+	ClientID string
 
 	mu        sync.Mutex
 	tunnels   map[string]*TunnelConfig // tunnel_id
@@ -136,8 +141,15 @@ func (c *Client) HandleOpenConnection(ctx context.Context, oc *protocol.OpenConn
 	}
 	c.trackData(dataConn)
 	defer c.untrackData(dataConn)
+	if c.Metrics != nil {
+		c.Metrics.ConnOpened(c.ClientID, tc.ID)
+	}
 	c.Log.Info("data connection established", "conn_id", oc.ConnID[:8], "tunnel", tc.Name)
-	<-Splice(origin, dataConn, 32*1024)
+	res := <-Splice(origin, dataConn, 32*1024)
+	if c.Metrics != nil {
+		// rx = bytes from public (dataConn read), tx = bytes to public
+		c.Metrics.RecordConn(c.ClientID, tc.ID, res.BytesToB, res.BytesToA)
+	}
 	return nil
 }
 
