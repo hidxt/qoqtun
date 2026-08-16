@@ -1,0 +1,14 @@
+{
+  "name": "qoqtun-desktop",
+  "outputfilename": "qoqtun-desktop",
+  "frontend:install": "",
+  "frontend:build": "",
+  "author": {
+    "name": "qoqtun"
+  },
+  "info": {
+    "productName": "qoqtun",
+    "productVersion": "0.1.0",
+    "copyright": "qoqtun contributors"
+  }
+}
